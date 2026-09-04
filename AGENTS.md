@@ -1,21 +1,15 @@
 # Repo intent
 
-This repository documents my journey. I built an inference server with eight NVIDIA
-CMP 170HX cards. This repository records the hardware, the kernel, the drivers, and
-the model-serving stack on top of that hardware. This repository exists so that I have
-one current record of how this machine works and why it works that way. This
-repository is not a support project. This repository is not a guide for other people.
-This repository does not try to work on other people's hardware. Read this repository
-as a personal log that contains working configuration, not as documentation for an
-audience.
+See [README.md](README.md) for what this repository is, and is not. This file adds
+rules for a coding agent working in it. Read README.md first.
 
 ## Writing rule: status quo only, no history
 
-Every file in this repository describes the current state of the system. Never write
-about a past state, a change, or the reason an old approach failed. Use `git log` and
-`git blame` for that. A document that says "we used to do X but changed to Y" is wrong
-the moment you write it. When something changes, edit the document to describe the new
-state. Do not add a note about the change.
+Every file in this repository describes the current state of the system, per
+README.md. Never write about a past state, a change, or the reason an old approach
+failed. Use `git log` and `git blame` for that. A document that says "we used to do X
+but changed to Y" is wrong the moment you write it. When something changes, edit the
+document to describe the new state. Do not add a note about the change.
 
 ## Writing rule: Simple English
 

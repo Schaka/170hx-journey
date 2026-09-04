@@ -2,8 +2,12 @@
 
 This is my own record of an inference server with eight NVIDIA CMP 170HX cards. It
 covers the hardware, the kernel I built myself, the drivers, and the model-serving
-stack that runs on top. These are my notes for my own use, not a guide for your setup.
-Every file describes the system as it stands today, not how it got that way.
+stack that runs on top. These are my notes for my own use, not a guide for your setup,
+and not a support project. Nothing here assumes it works on hardware other than mine.
+
+Every file describes the system as it stands today, not how it got that way. When
+something on the box changes, I edit the file to match. I do not add a note about the
+change. `git log` and `git blame` already keep that history.
 
 - [HARDWARE.md](HARDWARE.md): the cards, the PLX switches, the risers, and the cables.
 - [KERNEL.md](KERNEL.md): the custom kernel and driver stack, and why a stock kernel
