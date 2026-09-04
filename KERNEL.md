@@ -27,13 +27,15 @@ cards behind PLX switches.
 
 ## Thanks
 
-[bayley/cmpunlocker](https://github.com/bayley/cmpunlocker) makes this setup work. The
-kernel patches for the bridge-window bug came from that project. The full driver patch
-set for real BAR1 P2P came from that project too, not the mailbox path. This project is
-the reason 64 GB BAR1 behind a PLX switch works on this hardware. This project is also
-the reason P2P between these cards works. This repository also refers to
-[cachenetics/170tune](https://github.com/cachenetics/170tune) for general 170HX tuning
-context.
+- [amoghmunikote/cmpunlocker](https://github.com/amoghmunikote/cmpunlocker) (v0.3):
+  the base driver build this kernel runs, including the `610.57.04` source lineage
+  and the memory-geometry, BAR1-size, and PCIe Gen2 unlock patches.
+- [bayley/cmpunlocker](https://github.com/bayley/cmpunlocker): the kernel patch for
+  the bridge-window bug above, and the full driver patch set for real BAR1 P2P
+  instead of the dead mailbox path. This project is the reason 64 GB BAR1 behind a
+  PLX switch works on this hardware, and the reason P2P between these cards works.
+- [cachenetics/170tune](https://github.com/cachenetics/170tune): general 170HX
+  tuning reference.
 
 ## Kernel
 
