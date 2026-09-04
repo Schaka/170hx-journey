@@ -54,25 +54,101 @@ stock kernel.
 
 ```
 ro rootflags=subvol=root rhgb quiet
+intel_iommu=off iommu=off
 pci=realloc pci=hpmmioprefsize=2T
 pci=disable_acs_redir=0000:85:00.0
-pci=disable_acs_redir=0000:86:00.0
-pci=disable_acs_redir=0000:87:00.0
+pci=disable_acs_redir=0000:87:09.0
+pci=disable_acs_redir=0000:87:0b.0
 pci=disable_acs_redir=0000:87:11.0
 pci=disable_acs_redir=0000:87:13.0
 pci=disable_acs_redir=0000:ae:00.0
-pci=disable_acs_redir=0000:af:00.0
-pci=disable_acs_redir=0000:b0:00.0
+pci=disable_acs_redir=0000:b0:09.0
+pci=disable_acs_redir=0000:b0:0b.0
 pci=disable_acs_redir=0000:b0:11.0
 pci=disable_acs_redir=0000:b0:13.0
-intel_iommu=on iommu=pt
+rd.driver.blacklist=nouveau rd.driver.blacklist=nova-core
 ```
 
-Name every bridge along each GPU-to-GPU path in `disable_acs_redir`. Name the outer
-root ports. Also name the PLX switch's own internal ports, the `87:xx.x` and `b0:xx.x`
-entries above. If you skip an internal port, ACS redirection still blocks P2P traffic
-between cards on the same switch. The `pci=hpmmioprefsize=2T` argument gives enough
-prefetchable MMIO space for all eight cards' 64 GB BAR1 windows, plus headroom.
+The `disable_acs_redir` list names the two GPU-side root ports (`85:00.0`, `ae:00.0`)
+and all eight PLX switch downstream ports, one per card. The `pci=hpmmioprefsize=2T`
+argument gives enough prefetchable MMIO space for all eight cards' 64 GB BAR1 windows,
+plus headroom. `rd.driver.blacklist` keeps the kernel's own `nouveau`/`nova-core`
+drivers from claiming the cards before the patched NVIDIA driver does.
+
+`pci=disable_acs_redir` only changes the kernel's own P2P-DMA completion routing. It
+does **not** clear the ACS control register bit in PCIe config space on the affected
+bridges. GPU-to-GPU P2P on this hardware uses the BAR1 rewrite mechanism (see above).
+That mechanism routes through MMIO, not a hardware DMA engine. It works even with ACS
+still enabled at the hardware level.
+
+A DMA engine that bus-masters directly between two peers does need the ACS bit
+actually cleared in hardware. An NVMe controller doing GPUDirect Storage is one
+example. `disable_acs_redir` alone does not clear that bit. See
+[the GDS section below](#gpudirect-storage-status) for the current, unresolved state
+of that specific case.
+
+### Finding and changing kernel arguments on this box
+
+Use this method whenever a new piece of hardware or a new driver feature needs a
+kernel argument this repo does not already document.
+
+1. Read the running kernel's actual command line, not what a doc claims it is:
+   ```bash
+   cat /proc/cmdline
+   grubby --info=/boot/vmlinuz-7.1.10-cmp | grep args
+   ```
+   These two must agree. If they do not, the persistent boot entry and the kernel
+   that is actually running are out of sync.
+2. Map the PCIe topology for the device you care about:
+   ```bash
+   lspci -tv                                   # tree view, bridges and depth
+   lspci -d 10de:                               # NVIDIA GPUs
+   lspci -d 10b5:                               # PLX switches
+   ```
+   Every bridge between your two endpoints (the GPU and the peer device) is a
+   candidate for `disable_acs_redir`.
+3. Check whether ACS is actually enabled on a given bridge, in hardware, not just in
+   the kernel's redirect logic:
+   ```bash
+   lspci -vvv -s <bridge BDF> | grep -A1 'Capabilities:.*ACS'
+   ```
+   The `ACSCtl` line shows the control register. Bits `SrcValid`, `TransBlk`,
+   `ReqRedir`, `CmpltRedir`, and `UpstreamFwd` being set (`+`) means ACS is active on
+   that bridge.
+4. Change the argument list with `grubby`, passing the **complete** desired list in
+   one call. Two separate `grubby --args=` calls do not merge. The second call
+   replaces the whole token group from the first, and silently drops earlier entries:
+   ```bash
+   sudo grubby --update-kernel=/boot/vmlinuz-7.1.10-cmp --args='<the full args string>'
+   ```
+5. Check the change landed, before you reboot:
+   ```bash
+   grubby --info=/boot/vmlinuz-7.1.10-cmp | grep args
+   ```
+6. Reboot, then re-run the checks in
+   [How to check that it worked](#how-to-check-that-it-worked). Check that P2P did not
+   regress before you move on to testing whatever the new argument was for.
+
+## GPUDirect Storage status
+
+GDS is installed ([cachenetics/gds-nvme-patch](https://github.com/cachenetics/gds-nvme-patch),
+patched `nvme.ko` for kernel `7.1.10-cmp`, `nvidia-fs` 2.29.4 loaded) but not yet
+working. `gdscheck.py -p` reports `NVMe: compat`, and
+`/proc/driver/nvidia-fs/modules` does not list `nvme`.
+
+The NVMe driver correctly exports `nvme_v2_register_nvfs_dma_ops`. A check with `nm`
+against the built `nvme.ko` proves this. `nvidia_fs` also enumerates the full PCIe
+distance from every GPU to the NVMe device at module load (visible with
+`dbg_enabled=1` on `modprobe nvidia_fs`). Registration still does not complete.
+
+`gdscheck.py -p` itself names the likely cause: `Found ACS enabled for switch
+0000:87:09.0` (and seven more, one per PLX switch downstream port). Adding all eight
+ports to `disable_acs_redir` did not change this report or the `compat` status. That
+matches the note above: this argument does not clear the hardware ACS bit.
+
+The next step is not yet done: clear `ACSCtl` directly with `setpci` on each of the
+eight ports. That change also needs a boot-time hook to survive a reboot, because PCI
+config space resets on every power cycle.
 
 ## Driver module
 
