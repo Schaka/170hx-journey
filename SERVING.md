@@ -78,6 +78,37 @@ services runs at a time. The launch recipe uses tensor-parallel size 4, expert
 parallel, and MTP speculative decoding. This recipe matches wtdcode's own tested
 configuration for this model.
 
+### Two profiles: single-stream vs. many concurrent sessions
+
+The `qwen` profile above uses tensor-parallel size 4 on 4 GPUs, tuned for
+single-stream decode speed. A second profile, `qwen8gpu`, adds
+`--pipeline-parallel-size 2` on top, so the model splits across both PLX switch
+groups and uses all 8 GPUs. This trades single-stream latency for higher
+concurrency headroom: `max-num-seqs` goes from 8 to 64.
+
+Pipeline parallelism only pays off with several requests in flight at once, enough
+to keep every pipeline stage busy. A single request through `qwen8gpu` crosses an
+extra hop between the two switch groups. That hop carries no throughput benefit on
+its own, and the request measures the same speed as `qwen`, or slower.
+
+`nvidia-smi`'s `utilization.gpu` field reads 85 to 90% under this profile, even at
+low concurrency, but power draw stays at 75 to 95W per card. That combination means
+the GPUs spend most of their time on inter-GPU synchronization over PCIe Gen2, not
+on compute. Serve many concurrent agent sessions at once, and `qwen8gpu` is the
+right profile. Serve one interactive session, and `qwen` is the right profile.
+
+Measured aggregate completion throughput on `qwen8gpu`, 300-token completions:
+
+| concurrent requests | aggregate tok/s |
+|---|---|
+| 16 | 128.7 |
+| 32 | 193.4 |
+| 64 (the `max-num-seqs` ceiling) | 196.0 |
+
+Throughput plateaus between 32 and 64 concurrent requests. Pushing concurrency past
+32 buys almost no more aggregate throughput. It only splits the same total across
+more sessions, so each one gets a smaller share.
+
 ### LMCache is not enabled for this model
 
 The `lazymio/vllm-backport:latest-sm80` image bundles LMCache, a KV cache offload
@@ -104,5 +135,9 @@ wrapper around one `podman compose --profile <name> up -d` call.
 
 - `run-pp-dspark-podman.sh` starts the DeepSeek-V4-Flash service. It also checks GPU
   health before the start. If it finds a wedged GPU state, it recovers that state.
-- `run-qwen3-flash-next-podman.sh` starts the Qwen3.8-Flash-Next service. It stops the
-  DeepSeek-V4 service first, because the two share port 8098.
+- `run-qwen3-flash-next-podman.sh` starts the Qwen3.8-Flash-Next `qwen` profile
+  (single-stream, 4 GPUs). It stops the DeepSeek-V4 service first, because the two
+  share port 8098.
+- `run-qwen3-flash-next-8gpu-podman.sh` starts the Qwen3.8-Flash-Next `qwen8gpu`
+  profile (many concurrent sessions, all 8 GPUs). It stops both other services
+  first, for the same reason.
