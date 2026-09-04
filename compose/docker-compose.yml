@@ -1,0 +1,124 @@
+services:
+  dsv4:
+    image: ${DSV4_IMAGE:-dsv4-a100:devel}
+    container_name: dsv4-a100
+    profiles: ["dsv4"]
+    devices:
+      - nvidia.com/gpu=all
+    shm_size: "16g"
+    ports:
+      - "8098:8000"
+    environment:
+      HF_HUB_OFFLINE: "1"
+      VLLM_WORKER_MULTIPROC_METHOD: "spawn"
+      DSV4_LOGITS_ROW_CHUNK: "${DSV4_ROW_CHUNK:-64}"
+      DSV4_REP_FUZZY_MIN_HITS: "15"
+      DSV4_RECOVERY_MODE: "${DSV4_RECOVERY_MODE:-nudge}"
+    volumes:
+      - ${DSV4_MODEL:-${HOME}/models/models/deepseek-ai/DeepSeek-V4-Flash-0731}:/model
+      # These paths hold JIT and compile caches. Without this mount, every
+      # first start redoes a multi-minute torch.compile pass and a
+      # FlashInfer/Triton JIT warmup from scratch.
+      - ${HOME}/cache/dsv4/vllm:/root/.cache/vllm
+      - ${HOME}/cache/dsv4/flashinfer:/root/.cache/flashinfer
+      - ${HOME}/cache/dsv4/triton:/root/.triton
+      - ${HOME}/cache/dsv4/nv:/root/.nv
+      - ${HOME}/cache/dsv4/humming:/root/.humming
+      - ${HOME}/cache/dsv4/cupy:/root/.cupy
+      - ${HOME}/cache/dsv4/tilelang:/root/.tilelang
+    command:
+      - vllm
+      - serve
+      - /model
+      - --served-model-name
+      - dsv4s
+      - --pipeline-parallel-size
+      - "4"
+      - --kv-cache-dtype
+      - fp8
+      - --block-size
+      - "256"
+      - --max-model-len
+      - "${DSV4_MAXLEN:-1000000}"
+      - --max-num-batched-tokens
+      - "2048"
+      - --trust-remote-code
+      - --gpu-memory-utilization
+      - "0.85"
+      - --max-num-seqs
+      - "8"
+      - --no-enable-flashinfer-autotune
+      - --tokenizer-mode
+      - deepseek_v4
+      - --enable-auto-tool-choice
+      - --tool-call-parser
+      - deepseek_v4
+      - --reasoning-parser
+      - deepseek_v4
+      - --override-generation-config
+      - '{"top_p":0.95}'
+      - --speculative-config
+      - '{"method":"dspark","num_speculative_tokens":5}'
+
+  qwen:
+    image: ${QWEN_IMAGE:-docker.io/lazymio/vllm-backport:latest-sm80}
+    container_name: qwen3-flash-next
+    profiles: ["qwen"]
+    devices:
+      - nvidia.com/gpu=all
+    shm_size: "16g"
+    ports:
+      - "8098:8000"
+    environment:
+      VLLM_PLE_CPU_OFFLOAD: "1"
+      VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"
+      NCCL_ALGO: "Ring"
+      NCCL_PROTO: "Simple"
+    volumes:
+      - ${QWEN_MODEL:-${HOME}/models/models/Qwen/Qwen3.8-Flash-Next-FP8}:/model
+      - ${HOME}/cache/qwen/vllm:/root/.cache/vllm
+      - ${HOME}/cache/qwen/flashinfer:/root/.cache/flashinfer
+      - ${HOME}/cache/qwen/triton:/root/.triton
+      - ${HOME}/cache/qwen/nv:/root/.nv
+      - ${HOME}/cache/qwen/humming:/root/.humming
+      - ${HOME}/cache/qwen/cupy:/root/.cupy
+      - ${HOME}/cache/qwen/tilelang:/root/.tilelang
+    command:
+      - /model
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --served-model-name
+      - qwen3.8-flash-next
+      - --chat-template
+      - /model/chat_template_lenient_system.jinja
+      - --tensor-parallel-size
+      - "4"
+      - --enable-expert-parallel
+      - --max-model-len
+      - "${QWEN_MAXLEN:-1000000}"
+      - --max-num-seqs
+      - "8"
+      - --max-num-batched-tokens
+      - "2048"
+      - --gpu-memory-utilization
+      - "0.9"
+      - --disable-custom-all-reduce
+      - --speculative-config
+      - '{"method":"mtp","num_speculative_tokens":3}'
+      - --compilation-config
+      - '{"cudagraph_mode":"FULL_AND_PIECEWISE"}'
+      - --hf-overrides
+      - '{"text_config": {"rope_parameters": {"mrope_interleaved": true, "mrope_section": [11, 11, 10], "rope_type": "yarn", "rope_theta": 10000000, "partial_rotary_factor": 0.25, "factor": 4.0, "original_max_position_embeddings": 262144}}}'
+      - --enable-auto-tool-choice
+      - --tool-call-parser
+      - qwen3_xml
+      - --reasoning-parser
+      - qwen3
+      - --enable-prompt-tokens-details
+      - --enable-prefix-caching
+      - --mamba-cache-mode
+      - align
+      - --override-generation-config
+      - '{"temperature":1.0,"top_p":0.95,"top_k":20,"min_p":0.0,"presence_penalty":0.0,"repetition_penalty":1.0}'

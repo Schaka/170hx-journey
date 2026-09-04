@@ -1,32 +1,55 @@
 # Repo intent
 
-This repository documents **my** journey building an 8× NVIDIA CMP 170HX inference
-box — the hardware, the kernel, the drivers, and the model-serving stack on top of it.
-It exists so *I* have a single, current record of exactly how this machine is put
-together and why. It is not a support project, not a how-to for strangers, and not
-trying to be reusable by anyone else's hardware. Read it as a personal log with
-working config in it, not as documentation aimed at an audience.
+This repository documents my journey. I built an inference server with eight NVIDIA
+CMP 170HX cards. This repository records the hardware, the kernel, the drivers, and
+the model-serving stack on top of that hardware. This repository exists so that I have
+one current record of how this machine works and why it works that way. This
+repository is not a support project. This repository is not a guide for other people.
+This repository does not try to work on other people's hardware. Read this repository
+as a personal log that contains working configuration, not as documentation for an
+audience.
 
 ## Writing rule: status quo only, no history
 
-Every file in this repo describes **how things are right now**. Never write about how
-something used to be, what changed, or why an old approach was replaced — that's what
-`git log` and `git blame` are for. A doc that says "we used to do X but switched to Y"
-is wrong the moment it's written; overwrite it with what's true today instead.
+Every file in this repository describes the current state of the system. Never write
+about a past state, a change, or the reason an old approach failed. Use `git log` and
+`git blame` for that. A document that says "we used to do X but changed to Y" is wrong
+the moment you write it. When something changes, edit the document to describe the new
+state. Do not add a note about the change.
 
-This applies to every doc going forward, including files not yet written. When
-something changes on the machine, edit the doc to describe the new state — don't add
-a note about the change.
+## Writing rule: Simple English
+
+Every document in this repository, and every future document, must follow the Simple
+English rules from
+[AminBlg/SimpleEnglish](https://github.com/AminBlg/SimpleEnglish) in Plain mode. This
+plugin is installed for Claude Code as `simple-english@simple-english`.
+
+Before you write or edit any document in this repository, load the `simple-english`
+skill and apply Plain mode. The core rules:
+
+- Write short sentences: 20 words for an instruction, 25 words for an explanation.
+- Use active voice and simple tenses. Name the actor.
+- Use only these modals: can, will, must.
+- Use one word for one meaning, through the whole document.
+- Define a new technical term the first time you use it, in under ten words.
+- Delete words that add no fact. Use the word-swap table in the skill for examples.
+- Do not use semicolons or em dashes. Write two sentences instead.
+- Never change code, commands, file paths, flags, or quoted error text.
+
+If the `simple-english` skill or plugin is not available in your environment, read
+`prompts/system-prompt.md` from the [AminBlg/SimpleEnglish
+repository](https://github.com/AminBlg/SimpleEnglish) and follow it instead.
 
 ## Scope
 
-This repo will keep growing as the setup evolves: new kernel patches, new serving
-configs, new hardware. All of it belongs here, documented as current state at time of
-writing.
+This repository will grow as the setup changes: new kernel patches, new serving
+configuration, new hardware. All new material belongs here, written as the current
+state at the time you write it.
 
-## For coding agents working in this repo
+## For coding agents working in this repository
 
-- Don't add historical commentary, changelogs, or "previously this was..." notes to
-  any doc — see the rule above.
-- Don't assume anything here generalizes to other people's hardware. Kernel args, PCI
-  bus IDs, and card counts are specific to this one machine.
+- Do not add historical notes, changelogs, or "this used to be" comments to any
+  document. See the history rule above.
+- Do not assume anything here works on other hardware. The kernel arguments, PCI bus
+  IDs, and card counts belong to this one machine.
+- Load the `simple-english` skill before you write or edit any document.
