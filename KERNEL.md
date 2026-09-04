@@ -84,8 +84,9 @@ still enabled at the hardware level.
 A DMA engine that bus-masters directly between two peers does need the ACS bit
 actually cleared in hardware. An NVMe controller doing GPUDirect Storage is one
 example. `disable_acs_redir` alone does not clear that bit. See
-[the GDS section below](#gpudirect-storage-status) for the current, unresolved state
-of that specific case.
+[the GDS section below](#gpudirect-storage-status) for how this box clears it, and
+[the runbook above](#finding-and-changing-kernel-arguments-on-this-box) for the
+general method.
 
 ### Finding and changing kernel arguments on this box
 
@@ -110,45 +111,116 @@ kernel argument this repo does not already document.
 3. Check whether ACS is actually enabled on a given bridge, in hardware, not just in
    the kernel's redirect logic:
    ```bash
-   lspci -vvv -s <bridge BDF> | grep -A1 'Capabilities:.*ACS'
+   sudo lspci -vvv -s <bridge BDF> | grep -A2 'Capabilities:.*Access Control Services'
    ```
-   The `ACSCtl` line shows the control register. Bits `SrcValid`, `TransBlk`,
-   `ReqRedir`, `CmpltRedir`, and `UpstreamFwd` being set (`+`) means ACS is active on
-   that bridge.
-4. Change the argument list with `grubby`, passing the **complete** desired list in
-   one call. Two separate `grubby --args=` calls do not merge. The second call
-   replaces the whole token group from the first, and silently drops earlier entries:
+   This prints a block like:
+   ```
+   Capabilities: [f24 v1] Access Control Services
+           ACSCap: SrcValid+ TransBlk+ ReqRedir+ CmpltRedir+ UpstreamFwd+ EgressCtrl+ DirectTrans+
+           ACSCtl: SrcValid+ TransBlk- ReqRedir+ CmpltRedir+ UpstreamFwd+ EgressCtrl- DirectTrans-
+   ```
+   The number in `[f24 v1]` is the capability's byte offset into PCI config space.
+   `ACSCtl` is the live control register. Any bit shown with `+` is active. `ACSCap`
+   only lists which bits this bridge supports, not which ones are on.
+4. If a bridge on your path shows `ACSCtl` bits set, clear ACS in hardware with
+   `setpci`. The control register sits 6 bytes after the capability offset from step
+   3: a 4-byte capability header, then a 2-byte `ACSCap` field. For a capability at
+   `[f24]`, the control register is at `0xf2a`:
+   ```bash
+   sudo setpci -s <bridge BDF> 0xf2a.w=0000
+   ```
+   Repeat the `lspci` command from step 3 to check it took. Every `ACSCtl` bit must
+   now read `-`. This write is live and immediate. It needs no reboot to test.
+
+   It does not survive a reboot on its own, because PCI config space resets to
+   firmware defaults on every power cycle. Turn it into a systemd oneshot service,
+   ordered before whatever driver depends on it. See
+   [`clear-acs.service`](#example-clear-acsservice) below. Skip that step and it
+   silently reverts on the next boot.
+5. Change kernel *arguments* (not a live hardware register) with `grubby`. Pass the
+   complete desired list in one call. Two separate `grubby --args=` calls do not
+   merge. The second call replaces the whole token group from the first, and
+   silently drops earlier entries:
    ```bash
    sudo grubby --update-kernel=/boot/vmlinuz-7.1.10-cmp --args='<the full args string>'
    ```
-5. Check the change landed, before you reboot:
+6. Check the change landed, before you reboot:
    ```bash
    grubby --info=/boot/vmlinuz-7.1.10-cmp | grep args
    ```
-6. Reboot, then re-run the checks in
+7. Reboot, then re-run the checks in
    [How to check that it worked](#how-to-check-that-it-worked). Check that P2P did not
    regress before you move on to testing whatever the new argument was for.
 
+### Example: `clear-acs.service`
+
+A systemd oneshot unit that reapplies an ACS clear on every boot, before the driver
+that needs it loads:
+
+```ini
+# /etc/systemd/system/clear-acs.service
+[Unit]
+Description=Clear PCIe ACS on GPU/NVMe switch ports (GPUDirect Storage)
+DefaultDependencies=no
+Before=sysinit.target
+ConditionPathExists=/usr/local/sbin/clear-acs.sh
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/clear-acs.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=sysinit.target
+```
+
+```bash
+# /usr/local/sbin/clear-acs.sh
+#!/bin/bash
+set -euo pipefail
+PORTS=(87:09.0 87:0b.0 87:11.0 87:13.0 b0:09.0 b0:0b.0 b0:11.0 b0:13.0)
+for bdf in "${PORTS[@]}"; do
+    setpci -s "${bdf}" 0xf2a.w=0000
+done
+```
+
+`Before=sysinit.target` with `DefaultDependencies=no` runs this early enough to beat
+`nvidia_fs`'s module load. Enable it with
+`systemctl enable --now clear-acs.service`.
+
 ## GPUDirect Storage status
 
-GDS is installed ([cachenetics/gds-nvme-patch](https://github.com/cachenetics/gds-nvme-patch),
-patched `nvme.ko` for kernel `7.1.10-cmp`, `nvidia-fs` 2.29.4 loaded) but not yet
-working. `gdscheck.py -p` reports `NVMe: compat`, and
-`/proc/driver/nvidia-fs/modules` does not list `nvme`.
+GDS works. [`gdsio`](#checking-gds-with-gdsio) reports `XferType: GPUD` on both read
+and write against the NVMe. That is proof of a real GPUDirect transfer, and it
+survives a cold reboot.
 
-The NVMe driver correctly exports `nvme_v2_register_nvfs_dma_ops`. A check with `nm`
-against the built `nvme.ko` proves this. `nvidia_fs` also enumerates the full PCIe
-distance from every GPU to the NVMe device at module load (visible with
-`dbg_enabled=1` on `modprobe nvidia_fs`). Registration still does not complete.
+The install uses [cachenetics/gds-nvme-patch](https://github.com/cachenetics/gds-nvme-patch):
+a patched `nvme.ko` built for kernel `7.1.10-cmp`, plus `nvidia-fs` 2.29.4.
+`nvidia_fs` exposes its state at `/proc/driver/nvidia-fs/modules`, and
+`gdscheck.py -p` reports `nvfs, compat` for the NVMe path. Both of these describe
+`nvidia_fs`'s own static capability negotiation, not the runtime path an actual
+transfer takes. Trust `gdsio`'s `XferType` field over either of them.
 
-`gdscheck.py -p` itself names the likely cause: `Found ACS enabled for switch
-0000:87:09.0` (and seven more, one per PLX switch downstream port). Adding all eight
-ports to `disable_acs_redir` did not change this report or the `compat` status. That
-matches the note above: this argument does not clear the hardware ACS bit.
+What made it work: `gdscheck.py -p` named the real blocker directly, in its
+`PLATFORM INFO` section: `Found ACS enabled for switch 0000:87:09.0` (and seven more,
+one per PLX switch downstream port between the GPUs and the NVMe). `disable_acs_redir`
+in the kernel command line does not clear that bit. See the note above. Clearing
+`ACSCtl` directly with `setpci` on all eight ports removed every one of those
+warnings from `gdscheck`'s report, and made `gdsio` show `GPUD`.
+[`clear-acs.service`](#example-clear-acsservice) above makes that persist across a
+reboot.
 
-The next step is not yet done: clear `ACSCtl` directly with `setpci` on each of the
-eight ports. That change also needs a boot-time hook to survive a reboot, because PCI
-config space resets on every power cycle.
+### Checking GDS with `gdsio`
+
+```bash
+mkdir -p ~/gdstest
+sudo /usr/local/cuda-13.3/gds/tools/gdsio -D ~/gdstest -d 0 -w 1 -s 32M -i 1M -x 0 -I 1 -V
+rm -rf ~/gdstest
+```
+
+Look for `XferType: GPUD` in the output, on both the write and the read line.
+`XferType: CPUD` or a similar non-`GPUD` value means the transfer fell back to a
+CPU-staged copy. `gdscheck.py -p` can report `Supported` and this can still happen.
 
 ## Driver module
 
