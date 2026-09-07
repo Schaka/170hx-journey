@@ -2,22 +2,32 @@
 
 Every backend starts through
 [compose/docker-compose.yml](compose/docker-compose.yml). The compose file defines
-four services, `dsv4`, `dsv4backport`, `qwen`, and `qwen8gpu`, as separate
-profiles. All four are mutually exclusive on this host, because they all bind
-port 8098.
+seven services, `dsv4`, `dsv4backport`, `qwen`, `qwen8gpu`, `qwenawq`,
+`glm53flash`, and `glm53int4`, as separate profiles. All seven are mutually
+exclusive on this host, because they all bind port 8098.
 
 ## Model files
 
-Model weights live on the `/models` mount (`/dev/md0`), one directory per
-model: `/models/deepseek-ai/DeepSeek-V4-Flash-0731` and `/models/Qwen`. The
-compose file mounts these paths by default. Set `DSV4_MODEL` or `QWEN_MODEL` to
-override the path for a single run.
+Model weights live on the `/models` mount (`/dev/md0`), one directory per model:
 
-The Qwen services need a `chat_template_lenient_system.jinja` file next to the
-model weights, at `/models/Qwen/chat_template_lenient_system.jinja`. This file
-does not come from the model download. Right now `/models/Qwen` holds only the stock `chat_template.jinja`. The `qwen`
-and `qwen8gpu` services do not start until someone adds the lenient template
-back to that directory.
+| model | path |
+|---|---|
+| DeepSeek-V4-Flash-0731 | `/models/deepseek-ai/DeepSeek-V4-Flash-0731` |
+| Qwen3.8-Flash-Next-FP8 | `/models/Qwen` |
+| Qwen3.8-Flash-Next-AWQ-W4A16 | `/models/Qwen3.8-Flash-Next-AWQ-W4A16` |
+| GLM-5.3-Flash-AWQ-W4A16 | `/models/GLM-5.3-Flash-AWQ-W4A16` |
+| GLM-5.3-AWQ-INT4 | `/models/GLM-5.3-AWQ-INT4` |
+
+The compose file mounts these paths by default. Set `DSV4_MODEL`, `QWEN_MODEL`,
+`QWEN_AWQ_MODEL`, `GLM_FLASH_MODEL`, or `GLM_INT4_MODEL` to override the path
+for a single run.
+
+The `qwen`, `qwen8gpu`, and `qwenawq` services need a
+`chat_template_lenient_system.jinja` file next to their model weights. This
+file does not come from the model download. Right now `/models/Qwen` and
+`/models/Qwen3.8-Flash-Next-AWQ-W4A16` hold only the stock
+`chat_template.jinja`. These three services do not start until someone adds
+the lenient template back to both directories.
 
 ## DeepSeek-V4-Flash-0731
 
@@ -141,6 +151,18 @@ Throughput plateaus between 32 and 64 concurrent requests. Pushing concurrency p
 32 buys almost no more aggregate throughput. It only splits the same total across
 more sessions, so each one gets a smaller share.
 
+### Qwen3.8-Flash-Next-AWQ-W4A16: an untested alternative quantization
+
+The `qwenawq` profile runs
+[wtdcode/Qwen3.8-Flash-Next-AWQ-W4A16](https://huggingface.co/wtdcode/Qwen3.8-Flash-Next-AWQ-W4A16)
+on the same `lazymio/vllm-backport:latest-sm80` image, with the routed experts
+in INT4 and everything else in BF16. It uses `--tensor-parallel-size 4`, the
+same as the FP8 `qwen` profile, because this is the same base architecture
+already proven on this hardware. It sets `--compilation-config` to
+`{"mode":0,"cudagraph_mode":"FULL_DECODE_ONLY"}`, the value the AWQ build needs
+in place of `FULL_AND_PIECEWISE`. Nobody has run this profile on this
+hardware yet. Test it before you rely on it for regular use.
+
 ### LMCache is not enabled for this model
 
 The `lazymio/vllm-backport:latest-sm80` image bundles LMCache, a KV cache offload
@@ -149,6 +171,27 @@ Qwen3.8-Flash-Next. Setting `--kv-transfer-config` with `LMCacheConnectorV1` rai
 `ValueError: Failed to promote local KV cache specs to one unified type` at engine
 start, on this model. The model mixes attention layers with mamba or GDN layers. On this vLLM version, that
 mix does not unify into one KV cache spec under this connector.
+
+## GLM-5.3
+
+Two profiles run GLM-5.3 on the `lazymio/vllm-backport:latest-sm80` image.
+Both use `--pipeline-parallel-size 4`, not tensor-parallel, for the same
+reason as the DeepSeek-V4 profiles: this hardware has no P2P over PCIe Gen2,
+and pipeline parallel moves far less data across that link. Neither profile
+has run on this hardware yet. Test both before you rely on either for regular
+use.
+
+- `glm53flash` runs
+  [wtdcode/GLM-5.3-Flash-AWQ-W4A16](https://huggingface.co/wtdcode/GLM-5.3-Flash-AWQ-W4A16).
+  The launch configuration matches wtdcode's own published recipe for this model,
+  apart from the pipeline-parallel swap above. Start it with
+  [`run-glm53-flash-podman.sh`](scripts/run-glm53-flash-podman.sh).
+- `glm53int4` runs
+  [cyankiwi/GLM-5.3-AWQ-INT4](https://huggingface.co/cyankiwi/GLM-5.3-AWQ-INT4),
+  a different quantization of the same base model, published outside the
+  vllm-backport project. It uses the same launch configuration as `glm53flash`.
+  vllm-backport's support for this specific quantization is unconfirmed.
+  Start it with [`run-glm53-int4-podman.sh`](scripts/run-glm53-int4-podman.sh).
 
 ## Persisted JIT and compile caches
 
@@ -164,17 +207,24 @@ container restart.
 
 The scripts in [scripts/](scripts/) run on the workstation. Each script is a thin
 wrapper around one `podman compose --profile <name> up -d` call.
+[`stop-all-podman.sh`](scripts/stop-all-podman.sh) holds the list of every
+profile and a `stop_all` function that brings all of them down. Every other
+script sources it and calls `stop_all` before it starts its own profile,
+because all seven profiles share port 8098.
 
 - `run-pp-dspark-podman.sh` starts the DeepSeek-V4-Flash `dsv4` service, the fork
   build. It also checks GPU health before the start. If it finds a wedged GPU
   state, it recovers that state.
 - `run-dsv4-backport-podman.sh` starts the DeepSeek-V4-Flash `dsv4backport`
   service, the vllm-backport build. It checks GPU health the same way as
-  `run-pp-dspark-podman.sh`, and it stops the other three services first, because
-  all four share port 8098.
+  `run-pp-dspark-podman.sh`.
 - `run-qwen3-flash-next-podman.sh` starts the Qwen3.8-Flash-Next `qwen` profile
-  (single-stream, 4 GPUs). It stops the DeepSeek-V4 service first, because the two
-  share port 8098.
+  (single-stream, FP8, 4 GPUs).
 - `run-qwen3-flash-next-8gpu-podman.sh` starts the Qwen3.8-Flash-Next `qwen8gpu`
-  profile (many concurrent sessions, all 8 GPUs). It stops both other services
-  first, for the same reason.
+  profile (many concurrent sessions, FP8, all 8 GPUs).
+- `run-qwen3-flash-next-awq-podman.sh` starts the Qwen3.8-Flash-Next `qwenawq`
+  profile (AWQ W4A16 quantization).
+- `run-glm53-flash-podman.sh` starts the `glm53flash` profile
+  (GLM-5.3-Flash-AWQ-W4A16).
+- `run-glm53-int4-podman.sh` starts the `glm53int4` profile
+  (GLM-5.3-AWQ-INT4).

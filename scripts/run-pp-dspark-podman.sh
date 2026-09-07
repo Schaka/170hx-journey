@@ -1,9 +1,11 @@
 #!/bin/bash
 # Thin wrapper around the "dsv4" service in compose/docker-compose.yml. GPU
 # recovery logic runs first because a wedged GPU state (from a prior crash)
-# fails silently inside a container otherwise.
+# fails silently inside a container otherwise. Every model-serving profile
+# binds :8098, so this stops the others first.
 
-cd "$(dirname "${BASH_SOURCE[0]}")/../compose" || exit 1
+SCRIPT_DIR="$(dirname "${BASH_SOURCE[0]}")"
+source "$SCRIPT_DIR/stop-all-podman.sh"
 
 if ! podman run --rm --device nvidia.com/gpu=all \
         --entrypoint python3 "${DSV4_IMAGE:-dsv4-a100:devel}" \
@@ -15,6 +17,8 @@ if ! podman run --rm --device nvidia.com/gpu=all \
   for g in 0 1 2 3; do sudo nvidia-smi -i "$g" -pl 180 >/dev/null; done
 fi
 
+stop_all
+cd "$SCRIPT_DIR/../compose" || exit 1
 podman compose --profile dsv4 up -d
 echo "launched dsv4-a100 on :8098"
 echo "watch: podman logs -f dsv4-a100"

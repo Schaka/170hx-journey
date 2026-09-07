@@ -5,11 +5,11 @@
 # tensor-parallel, for the same reason as the fork: this hardware has no P2P
 # over PCIe Gen2, and pipeline parallel moves far less data across that link.
 # GPU recovery logic runs first because a wedged GPU state (from a prior crash)
-# fails silently inside a container otherwise. dsv4-a100, dsv4-backport,
-# qwen3-flash-next, and qwen3-flash-next-8gpu are mutually exclusive on this
-# host (all four bind :8098), so bring the others down first.
+# fails silently inside a container otherwise. Every model-serving profile
+# binds :8098, so this stops the others first.
 
-cd "$(dirname "${BASH_SOURCE[0]}")/../compose" || exit 1
+SCRIPT_DIR="$(dirname "${BASH_SOURCE[0]}")"
+source "$SCRIPT_DIR/stop-all-podman.sh"
 
 if ! podman run --rm --device nvidia.com/gpu=all \
         --entrypoint python3 "${DSV4_BACKPORT_IMAGE:-docker.io/lazymio/vllm-backport:latest-sm80}" \
@@ -21,9 +21,8 @@ if ! podman run --rm --device nvidia.com/gpu=all \
   for g in 0 1 2 3; do sudo nvidia-smi -i "$g" -pl 180 >/dev/null; done
 fi
 
-podman compose --profile dsv4 down >/dev/null 2>&1
-podman compose --profile qwen down >/dev/null 2>&1
-podman compose --profile qwen8gpu down >/dev/null 2>&1
+stop_all
+cd "$SCRIPT_DIR/../compose" || exit 1
 podman compose --profile dsv4backport up -d
 echo "launched dsv4-backport on :8098"
 echo "watch: podman logs -f dsv4-backport"

@@ -1,11 +1,12 @@
 #!/bin/bash
-# Thin wrapper around the "qwen" service in compose/docker-compose.yml.
-# dsv4-a100 and qwen3-flash-next are mutually exclusive on this host (both
-# bind :8098), so bring the other one down first.
+# Thin wrapper around the "qwen" service in compose/docker-compose.yml. Every
+# model-serving profile binds :8098, so this stops the others first.
 
-cd "$(dirname "${BASH_SOURCE[0]}")/../compose" || exit 1
+SCRIPT_DIR="$(dirname "${BASH_SOURCE[0]}")"
+source "$SCRIPT_DIR/stop-all-podman.sh"
 
-podman compose --profile dsv4 down >/dev/null 2>&1
+stop_all
+cd "$SCRIPT_DIR/../compose" || exit 1
 podman compose --profile qwen up -d
 echo "launched qwen3-flash-next on :8098"
 echo "watch: podman logs -f qwen3-flash-next"

@@ -177,6 +177,173 @@ services:
       - --override-generation-config
       - '{"temperature":1.0,"top_p":0.95,"top_k":20,"min_p":0.0,"presence_penalty":0.0,"repetition_penalty":1.0}'
 
+  qwenawq:
+    image: ${QWEN_IMAGE:-docker.io/lazymio/vllm-backport:latest-sm80}
+    container_name: qwen3.8-flash-next-awq
+    profiles: ["qwenawq"]
+    devices:
+      - nvidia.com/gpu=all
+    shm_size: "16g"
+    ports:
+      - "8098:8000"
+    environment:
+      VLLM_PLE_CPU_OFFLOAD: "1"
+      VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"
+      NCCL_ALGO: "Ring"
+      NCCL_PROTO: "Simple"
+    volumes:
+      - ${QWEN_AWQ_MODEL:-/models/Qwen3.8-Flash-Next-AWQ-W4A16}:/model
+      - ${HOME}/cache/qwenawq/vllm:/root/.cache/vllm
+      - ${HOME}/cache/qwenawq/flashinfer:/root/.cache/flashinfer
+      - ${HOME}/cache/qwenawq/triton:/root/.triton
+      - ${HOME}/cache/qwenawq/nv:/root/.nv
+      - ${HOME}/cache/qwenawq/humming:/root/.humming
+      - ${HOME}/cache/qwenawq/cupy:/root/.cupy
+      - ${HOME}/cache/qwenawq/tilelang:/root/.tilelang
+    command:
+      - /model
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --served-model-name
+      - qwen3.8-flash-next-awq
+      - --chat-template
+      - /model/chat_template_lenient_system.jinja
+      - --tensor-parallel-size
+      - "4"
+      - --enable-expert-parallel
+      - --max-model-len
+      - "${QWEN_MAXLEN:-1000000}"
+      - --max-num-seqs
+      - "8"
+      - --max-num-batched-tokens
+      - "2048"
+      - --gpu-memory-utilization
+      - "0.9"
+      - --disable-custom-all-reduce
+      - --speculative-config
+      - '{"method":"mtp","num_speculative_tokens":3}'
+      - --compilation-config
+      - '{"mode":0,"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - --hf-overrides
+      - '{"text_config": {"rope_parameters": {"mrope_interleaved": true, "mrope_section": [11, 11, 10], "rope_type": "yarn", "rope_theta": 10000000, "partial_rotary_factor": 0.25, "factor": 4.0, "original_max_position_embeddings": 262144}}}'
+      - --enable-auto-tool-choice
+      - --tool-call-parser
+      - qwen3_xml
+      - --reasoning-parser
+      - qwen3
+      - --enable-prompt-tokens-details
+      - --enable-prefix-caching
+      - --mamba-cache-mode
+      - align
+      - --override-generation-config
+      - '{"temperature":1.0,"top_p":0.95,"top_k":20,"min_p":0.0,"presence_penalty":0.0,"repetition_penalty":1.0}'
+
+  glm53flash:
+    image: ${GLM_IMAGE:-docker.io/lazymio/vllm-backport:latest-sm80}
+    container_name: glm-5.3-flash
+    profiles: ["glm53flash"]
+    devices:
+      - nvidia.com/gpu=all
+    shm_size: "16g"
+    ports:
+      - "8098:8000"
+    environment:
+      NCCL_ALGO: "Ring"
+      NCCL_PROTO: "Simple"
+    volumes:
+      - ${GLM_FLASH_MODEL:-/models/GLM-5.3-Flash-AWQ-W4A16}:/model
+      - ${HOME}/cache/glm53flash/vllm:/root/.cache/vllm
+      - ${HOME}/cache/glm53flash/flashinfer:/root/.cache/flashinfer
+      - ${HOME}/cache/glm53flash/triton:/root/.triton
+      - ${HOME}/cache/glm53flash/nv:/root/.nv
+      - ${HOME}/cache/glm53flash/humming:/root/.humming
+      - ${HOME}/cache/glm53flash/cupy:/root/.cupy
+      - ${HOME}/cache/glm53flash/tilelang:/root/.tilelang
+    command:
+      - /model
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --served-model-name
+      - glm-5.3-flash
+      - --pipeline-parallel-size
+      - "4"
+      - --max-model-len
+      - "${GLM_MAXLEN:-524288}"
+      - --gpu-memory-utilization
+      - "0.85"
+      - --max-num-seqs
+      - "16"
+      - --max-num-batched-tokens
+      - "8192"
+      - --enable-prefix-caching
+      - --enable-prompt-tokens-details
+      - --disable-custom-all-reduce
+      - --compilation-config
+      - '{"cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[1,2,4,8,16],"max_cudagraph_capture_size":16}'
+      - --speculative-config
+      - '{"method":"mtp","num_speculative_tokens":3}'
+      - --enable-auto-tool-choice
+      - --tool-call-parser
+      - glm47
+      - --reasoning-parser
+      - glm45
+
+  glm53int4:
+    image: ${GLM_IMAGE:-docker.io/lazymio/vllm-backport:latest-sm80}
+    container_name: glm-5.3-int4
+    profiles: ["glm53int4"]
+    devices:
+      - nvidia.com/gpu=all
+    shm_size: "16g"
+    ports:
+      - "8098:8000"
+    environment:
+      NCCL_ALGO: "Ring"
+      NCCL_PROTO: "Simple"
+    volumes:
+      - ${GLM_INT4_MODEL:-/models/GLM-5.3-AWQ-INT4}:/model
+      - ${HOME}/cache/glm53int4/vllm:/root/.cache/vllm
+      - ${HOME}/cache/glm53int4/flashinfer:/root/.cache/flashinfer
+      - ${HOME}/cache/glm53int4/triton:/root/.triton
+      - ${HOME}/cache/glm53int4/nv:/root/.nv
+      - ${HOME}/cache/glm53int4/humming:/root/.humming
+      - ${HOME}/cache/glm53int4/cupy:/root/.cupy
+      - ${HOME}/cache/glm53int4/tilelang:/root/.tilelang
+    command:
+      - /model
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --served-model-name
+      - glm-5.3-int4
+      - --pipeline-parallel-size
+      - "4"
+      - --max-model-len
+      - "${GLM_MAXLEN:-524288}"
+      - --gpu-memory-utilization
+      - "0.85"
+      - --max-num-seqs
+      - "16"
+      - --max-num-batched-tokens
+      - "8192"
+      - --enable-prefix-caching
+      - --enable-prompt-tokens-details
+      - --disable-custom-all-reduce
+      - --compilation-config
+      - '{"cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[1,2,4,8,16],"max_cudagraph_capture_size":16}'
+      - --speculative-config
+      - '{"method":"mtp","num_speculative_tokens":3}'
+      - --enable-auto-tool-choice
+      - --tool-call-parser
+      - glm47
+      - --reasoning-parser
+      - glm45
+
   qwen8gpu:
     image: ${QWEN_IMAGE:-docker.io/lazymio/vllm-backport:latest-sm80}
     container_name: qwen3-flash-next-8gpu
