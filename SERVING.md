@@ -183,8 +183,12 @@ use.
 
 - `glm53flash` runs
   [wtdcode/GLM-5.3-Flash-AWQ-W4A16](https://huggingface.co/wtdcode/GLM-5.3-Flash-AWQ-W4A16).
-  The launch configuration matches wtdcode's own published recipe for this model,
-  apart from the pipeline-parallel swap above. Start it with
+  The launch configuration matches wtdcode's own published recipe for this
+  model, apart from the pipeline-parallel swap above and `--max-model-len`.
+  This profile sets `--max-model-len` to `1000000` (`GLM_MAXLEN`), in place of
+  wtdcode's more conservative `524288`. That value stays close to the model's
+  native ceiling of `1048576`, and it matches the limit set on every other
+  model in this file. Start it with
   [`run-glm53-flash-podman.sh`](scripts/run-glm53-flash-podman.sh).
 - `glm53int4` runs
   [cyankiwi/GLM-5.3-AWQ-INT4](https://huggingface.co/cyankiwi/GLM-5.3-AWQ-INT4),
