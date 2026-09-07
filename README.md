@@ -13,8 +13,8 @@ change. `git log` and `git blame` already keep that history.
 - [KERNEL.md](KERNEL.md): the custom kernel and driver stack, and why a stock kernel
   cannot do this job.
 - [BIOS.md](BIOS.md): the VBIOS state on all eight cards.
-- [SERVING.md](SERVING.md): the model-serving stack (DeepSeek-V4-Flash, Qwen3.8) and
-  the agent-client configuration.
+- [SERVING.md](SERVING.md): the model-serving stack (DeepSeek-V4-Flash on two
+  backends, and Qwen3.8) and the agent-client configuration.
 - [compose/](compose/): the compose file that starts each model server.
 - [scripts/](scripts/): the launcher scripts that run on the workstation.
 

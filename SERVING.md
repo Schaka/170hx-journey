@@ -1,8 +1,23 @@
 # Model serving
 
-Both models start through [compose/docker-compose.yml](compose/docker-compose.yml).
-The compose file defines two services, `dsv4` and `qwen`, as separate profiles. The
-two services are mutually exclusive on this host, because both bind port 8098.
+Every backend starts through
+[compose/docker-compose.yml](compose/docker-compose.yml). The compose file defines
+four services, `dsv4`, `dsv4backport`, `qwen`, and `qwen8gpu`, as separate
+profiles. All four are mutually exclusive on this host, because they all bind
+port 8098.
+
+## Model files
+
+Model weights live on the `/models` mount (`/dev/md0`), one directory per
+model: `/models/deepseek-ai/DeepSeek-V4-Flash-0731` and `/models/Qwen`. The
+compose file mounts these paths by default. Set `DSV4_MODEL` or `QWEN_MODEL` to
+override the path for a single run.
+
+The Qwen services need a `chat_template_lenient_system.jinja` file next to the
+model weights, at `/models/Qwen/chat_template_lenient_system.jinja`. This file
+does not come from the model download. Right now `/models/Qwen` holds only the stock `chat_template.jinja`. The `qwen`
+and `qwen8gpu` services do not start until someone adds the lenient template
+back to that directory.
 
 ## DeepSeek-V4-Flash-0731
 
@@ -27,9 +42,26 @@ One patch in that fork is required for any agent tool, not optional:
 
 The fork also has a series of repetition-loop-recovery patches, numbered `0016`
 through `0022`. These patches have no proven effect beyond what patch `0023` fixes
-on its own. A future task is to test whether
-[wtdcode/vllm-backport](https://github.com/wtdcode/vllm-backport) already handles loop
-recovery without these patches.
+on its own.
+
+### Alternative backend: vllm-backport
+
+The `dsv4backport` profile runs the same DeepSeek-V4-Flash-0731 model on the
+upstream [wtdcode/vllm-backport](https://github.com/wtdcode/vllm-backport) image
+(`lazymio/vllm-backport:latest-sm80`) instead of the fork above. Start it with
+[`run-dsv4-backport-podman.sh`](scripts/run-dsv4-backport-podman.sh).
+
+This profile sets `--pipeline-parallel-size 4`, not tensor-parallel, for the same
+reason as the fork. This hardware has no P2P over PCIe Gen2, and pipeline parallel
+moves far less data across that link. It sets `--kv-cache-dtype fp8_ds_mla`, the
+value that vllm-backport requires for this model, in place of the fork's `fp8`.
+
+The vllm-backport maintainer reports a fix for the reasoning-loop problem on the
+`main` branch. See [issue #22](https://github.com/wtdcode/vllm-backport/issues/22)
+for the report. This profile is a way to test that fix on this hardware. Patch
+`0023` from the fork is not present in this backend, because vllm-backport is a
+separate codebase. Compare the two profiles for reasoning-loop behavior before you
+pick one for regular use.
 
 ### Agent client configuration (opencode example)
 
@@ -133,8 +165,13 @@ container restart.
 The scripts in [scripts/](scripts/) run on the workstation. Each script is a thin
 wrapper around one `podman compose --profile <name> up -d` call.
 
-- `run-pp-dspark-podman.sh` starts the DeepSeek-V4-Flash service. It also checks GPU
-  health before the start. If it finds a wedged GPU state, it recovers that state.
+- `run-pp-dspark-podman.sh` starts the DeepSeek-V4-Flash `dsv4` service, the fork
+  build. It also checks GPU health before the start. If it finds a wedged GPU
+  state, it recovers that state.
+- `run-dsv4-backport-podman.sh` starts the DeepSeek-V4-Flash `dsv4backport`
+  service, the vllm-backport build. It checks GPU health the same way as
+  `run-pp-dspark-podman.sh`, and it stops the other three services first, because
+  all four share port 8098.
 - `run-qwen3-flash-next-podman.sh` starts the Qwen3.8-Flash-Next `qwen` profile
   (single-stream, 4 GPUs). It stops the DeepSeek-V4 service first, because the two
   share port 8098.
