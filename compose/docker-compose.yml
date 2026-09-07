@@ -272,6 +272,58 @@ services:
       - --pipeline-parallel-size
       - "4"
       - --max-model-len
+      - "${GLM_MAXLEN:-524288}"
+      - --gpu-memory-utilization
+      - "0.85"
+      - --max-num-seqs
+      - "16"
+      - --max-num-batched-tokens
+      - "8192"
+      - --enable-prefix-caching
+      - --enable-prompt-tokens-details
+      - --disable-custom-all-reduce
+      - --compilation-config
+      - '{"cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[1,2,4,8,16],"max_cudagraph_capture_size":16}'
+      - --speculative-config
+      - '{"method":"mtp","num_speculative_tokens":3}'
+      - --enable-auto-tool-choice
+      - --tool-call-parser
+      - glm47
+      - --reasoning-parser
+      - glm45
+
+  glm53flash8gpu:
+    image: ${GLM_IMAGE:-docker.io/lazymio/vllm-backport:latest-sm80}
+    container_name: glm-5.3-flash-8gpu
+    profiles: ["glm53flash8gpu"]
+    devices:
+      - nvidia.com/gpu=all
+    shm_size: "16g"
+    ports:
+      - "8098:8000"
+    environment:
+      NCCL_ALGO: "Ring"
+      NCCL_PROTO: "Simple"
+    volumes:
+      - ${GLM_FLASH_MODEL:-/models/GLM-5.3-Flash-AWQ-W4A16}:/model
+      - ${HOME}/cache/glm53flash/vllm:/root/.cache/vllm
+      - ${HOME}/cache/glm53flash/flashinfer:/root/.cache/flashinfer
+      - ${HOME}/cache/glm53flash/triton:/root/.triton
+      - ${HOME}/cache/glm53flash/nv:/root/.nv
+      - ${HOME}/cache/glm53flash/humming:/root/.humming
+      - ${HOME}/cache/glm53flash/cupy:/root/.cupy
+      - ${HOME}/cache/glm53flash/tilelang:/root/.tilelang
+    command:
+      - /model
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --served-model-name
+      - glm-5.3-flash
+      - --pipeline-parallel-size
+      - "8"
+      - --max-model-len
       - "${GLM_MAXLEN:-1000000}"
       - --gpu-memory-utilization
       - "0.85"
@@ -323,6 +375,58 @@ services:
       - glm-5.3-int4
       - --pipeline-parallel-size
       - "4"
+      - --max-model-len
+      - "${GLM_MAXLEN:-524288}"
+      - --gpu-memory-utilization
+      - "0.85"
+      - --max-num-seqs
+      - "16"
+      - --max-num-batched-tokens
+      - "8192"
+      - --enable-prefix-caching
+      - --enable-prompt-tokens-details
+      - --disable-custom-all-reduce
+      - --compilation-config
+      - '{"cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[1,2,4,8,16],"max_cudagraph_capture_size":16}'
+      - --speculative-config
+      - '{"method":"mtp","num_speculative_tokens":3}'
+      - --enable-auto-tool-choice
+      - --tool-call-parser
+      - glm47
+      - --reasoning-parser
+      - glm45
+
+  glm53int48gpu:
+    image: ${GLM_IMAGE:-docker.io/lazymio/vllm-backport:latest-sm80}
+    container_name: glm-5.3-int4-8gpu
+    profiles: ["glm53int48gpu"]
+    devices:
+      - nvidia.com/gpu=all
+    shm_size: "16g"
+    ports:
+      - "8098:8000"
+    environment:
+      NCCL_ALGO: "Ring"
+      NCCL_PROTO: "Simple"
+    volumes:
+      - ${GLM_INT4_MODEL:-/models/GLM-5.3-AWQ-INT4}:/model
+      - ${HOME}/cache/glm53int4/vllm:/root/.cache/vllm
+      - ${HOME}/cache/glm53int4/flashinfer:/root/.cache/flashinfer
+      - ${HOME}/cache/glm53int4/triton:/root/.triton
+      - ${HOME}/cache/glm53int4/nv:/root/.nv
+      - ${HOME}/cache/glm53int4/humming:/root/.humming
+      - ${HOME}/cache/glm53int4/cupy:/root/.cupy
+      - ${HOME}/cache/glm53int4/tilelang:/root/.tilelang
+    command:
+      - /model
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --served-model-name
+      - glm-5.3-int4
+      - --pipeline-parallel-size
+      - "8"
       - --max-model-len
       - "${GLM_MAXLEN:-1000000}"
       - --gpu-memory-utilization

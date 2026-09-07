@@ -2,9 +2,9 @@
 
 Every backend starts through
 [compose/docker-compose.yml](compose/docker-compose.yml). The compose file defines
-seven services, `dsv4`, `dsv4backport`, `qwen`, `qwen8gpu`, `qwenawq`,
-`glm53flash`, and `glm53int4`, as separate profiles. All seven are mutually
-exclusive on this host, because they all bind port 8098.
+nine profiles: `dsv4`, `dsv4backport`, `qwen`, `qwen8gpu`, `qwenawq`, `glm53flash`,
+`glm53flash8gpu`, `glm53int4`, and `glm53int48gpu`. All nine are mutually exclusive
+on this host, because they all bind port 8098.
 
 ## Model files
 
@@ -174,28 +174,49 @@ mix does not unify into one KV cache spec under this connector.
 
 ## GLM-5.3
 
-Two profiles run GLM-5.3 on the `lazymio/vllm-backport:latest-sm80` image.
-Both use `--pipeline-parallel-size 4`, not tensor-parallel, for the same
-reason as the DeepSeek-V4 profiles: this hardware has no P2P over PCIe Gen2,
-and pipeline parallel moves far less data across that link. Neither profile
-has run on this hardware yet. Test both before you rely on either for regular
-use.
+Four profiles run GLM-5.3 on the `lazymio/vllm-backport:latest-sm80` image, two
+per quantization: one on 4 GPUs and one on all 8. All four use
+`--pipeline-parallel-size`, not tensor-parallel, for the same reason as the
+DeepSeek-V4 profiles: this hardware has no P2P over PCIe Gen2, and pipeline
+parallel moves far less data across that link.
 
-- `glm53flash` runs
-  [wtdcode/GLM-5.3-Flash-AWQ-W4A16](https://huggingface.co/wtdcode/GLM-5.3-Flash-AWQ-W4A16).
-  The launch configuration matches wtdcode's own published recipe for this
-  model, apart from the pipeline-parallel swap above and `--max-model-len`.
-  This profile sets `--max-model-len` to `1000000` (`GLM_MAXLEN`), in place of
-  wtdcode's more conservative `524288`. That value stays close to the model's
-  native ceiling of `1048576`, and it matches the limit set on every other
-  model in this file. Start it with
-  [`run-glm53-flash-podman.sh`](scripts/run-glm53-flash-podman.sh).
-- `glm53int4` runs
+GLM-5.3's roughly 176 GB of weights do not split evenly across pipeline
+stages. On 4 GPUs, `--pipeline-parallel-size 4` overflows a single 64 GB card
+during warmup, before the engine even starts sizing the KV cache. This
+happens at any `--max-model-len`, including wtdcode's own conservative
+`524288`, so `glm53flash` and `glm53int4` (both `--pipeline-parallel-size 4`)
+do not start on this hardware. `--pipeline-parallel-size 8` spreads the same
+weights across all 8 GPUs instead, and tested working on this hardware:
+peak memory per card drops to about 52 GB out of 64 GB.
+
+- `glm53flash8gpu` runs
+  [wtdcode/GLM-5.3-Flash-AWQ-W4A16](https://huggingface.co/wtdcode/GLM-5.3-Flash-AWQ-W4A16)
+  on 8 GPUs. Tested working on this hardware. It sets `--max-model-len` to
+  `1000000` (`GLM_MAXLEN`), in place of wtdcode's `524288`. That value stays
+  close to the model's native ceiling of `1048576`, and it matches the limit
+  set on every other model in this file. Start it with
+  [`run-glm53-flash-8gpu-podman.sh`](scripts/run-glm53-flash-8gpu-podman.sh).
+  Single-stream decode measures 13 to 16 tokens per second on this profile,
+  well below the other models in this file. Every token crosses 7 inter-GPU
+  handoffs, over a Gen2 x4 link with no P2P, instead of the 3 handoffs that
+  `--pipeline-parallel-size 4` needs. `glm53flash8gpu` pays a larger version
+  of the same hop cost documented for `qwen8gpu` below. The MTP speculative
+  decoding in this profile barely helps. Mean acceptance length measures
+  around 1.12, with a 4 to 5% draft acceptance rate. Most draft tokens go to
+  waste, and each one still pays for a full round trip through all 8 stages.
+- `glm53int48gpu` runs
   [cyankiwi/GLM-5.3-AWQ-INT4](https://huggingface.co/cyankiwi/GLM-5.3-AWQ-INT4),
   a different quantization of the same base model, published outside the
-  vllm-backport project. It uses the same launch configuration as `glm53flash`.
-  vllm-backport's support for this specific quantization is unconfirmed.
-  Start it with [`run-glm53-int4-podman.sh`](scripts/run-glm53-int4-podman.sh).
+  vllm-backport project, on 8 GPUs. It uses the same launch configuration as
+  `glm53flash8gpu`. vllm-backport's support for this specific quantization is
+  untested, and this profile has not run on this hardware yet. Start it
+  with [`run-glm53-int4-8gpu-podman.sh`](scripts/run-glm53-int4-8gpu-podman.sh).
+- `glm53flash` and `glm53int4` keep the same launch configuration on
+  `--pipeline-parallel-size 4`. This is a placeholder for a future case where
+  only 4 GPUs are free, for example a second model running on the other
+  switch group. Neither starts as configured today. Fixing either needs a
+  lower `--gpu-memory-utilization`, a smaller `--max-num-batched-tokens`, or
+  fewer `cudagraph_capture_sizes`, and nobody has done that work yet.
 
 ## Persisted JIT and compile caches
 
@@ -214,7 +235,7 @@ wrapper around one `podman compose --profile <name> up -d` call.
 [`stop-all-podman.sh`](scripts/stop-all-podman.sh) holds the list of every
 profile and a `stop_all` function that brings all of them down. Every other
 script sources it and calls `stop_all` before it starts its own profile,
-because all seven profiles share port 8098.
+because all nine profiles share port 8098.
 
 - `run-pp-dspark-podman.sh` starts the DeepSeek-V4-Flash `dsv4` service, the fork
   build. It also checks GPU health before the start. If it finds a wedged GPU
@@ -229,6 +250,10 @@ because all seven profiles share port 8098.
 - `run-qwen3-flash-next-awq-podman.sh` starts the Qwen3.8-Flash-Next `qwenawq`
   profile (AWQ W4A16 quantization).
 - `run-glm53-flash-podman.sh` starts the `glm53flash` profile
-  (GLM-5.3-Flash-AWQ-W4A16).
+  (GLM-5.3-Flash-AWQ-W4A16, 4 GPUs). Does not start on this hardware today.
+- `run-glm53-flash-8gpu-podman.sh` starts the `glm53flash8gpu` profile
+  (GLM-5.3-Flash-AWQ-W4A16, all 8 GPUs).
 - `run-glm53-int4-podman.sh` starts the `glm53int4` profile
-  (GLM-5.3-AWQ-INT4).
+  (GLM-5.3-AWQ-INT4, 4 GPUs). Does not start on this hardware today.
+- `run-glm53-int4-8gpu-podman.sh` starts the `glm53int48gpu` profile
+  (GLM-5.3-AWQ-INT4, all 8 GPUs).
