@@ -470,6 +470,8 @@ services:
     environment:
       NCCL_ALGO: "Ring"
       NCCL_PROTO: "Simple"
+      VLLM_PP_LAYER_PARTITION: "${GLM_INT4_PARTITION:-22,20,20,16}"
+      PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
     volumes:
       - ${GLM_INT4_MODEL:-/models/GLM-5.3-AWQ-INT4}:/model
       - ${HOME}/patches/vllm-backport/mtp-embed-from-checkpoint.py:/usr/local/lib/python3.12/dist-packages/vllm/v1/worker/gpu/spec_decode/eagle/utils.py:ro
@@ -488,8 +490,10 @@ services:
       - "8000"
       - --served-model-name
       - glm-5.3-int4
+      - --tensor-parallel-size
+      - "2"
       - --pipeline-parallel-size
-      - "8"
+      - "4"
       - --max-model-len
       - "${GLM_MAXLEN:-1000000}"
       - --gpu-memory-utilization
@@ -497,7 +501,8 @@ services:
       - --max-num-seqs
       - "16"
       - --max-num-batched-tokens
-      - "8192"
+      - "${GLM_INT4_BATCHED_TOKENS:-8192}"
+      - --enable-expert-parallel
       - --enable-prefix-caching
       - --enable-prompt-tokens-details
       - --disable-custom-all-reduce

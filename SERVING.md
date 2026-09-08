@@ -306,11 +306,29 @@ the vllm-backport project. The checkpoint is 455 GB on disk.
 
 `glm53int4` requests only 4 GPUs, 256 GB of VRAM total. The checkpoint alone
 is 455 GB, so this profile cannot load the model at all, on any parallelism
-setting. `glm53int48gpu` requests all 8 GPUs, 512 GB total, and uses
-`--pipeline-parallel-size 8` at `--gpu-memory-utilization 0.85`. That setting
-caps the engine at 435 GB, short of the 455 GB checkpoint. This profile also
-fails, before it starts sizing the KV cache. Nobody raised
-`--gpu-memory-utilization` high enough to test it on this hardware yet. Start them with
+setting.
+
+`glm53int48gpu` requests all 8 GPUs, 512 GB total, and does not start yet
+either. `--gpu-memory-utilization` sets a budget for the KV cache, sized
+after weight loading finishes. It does not limit weight loading itself, so
+raising it from 0.85 to 0.95, then to 0.98, made no difference.
+
+With `--pipeline-parallel-size 8` (one GPU per stage), a single 64 GB card
+cannot hold a full pipeline stage of this model. There is no safety margin
+left over. The last stage carries a separate, non-tied `lm_head` and the grafted
+MTP layer, on top of its regular hidden layers. vLLM also allocates a
+temporary buffer once per GPU, to repack the quantized MoE weights into
+Marlin's kernel format. Together these push every stage past 63 GB, before
+the KV cache is even sized.
+
+Adding `--tensor-parallel-size 2` on top of `--pipeline-parallel-size 4`
+does not fix this. This checkpoint's MoE weight format does not shard
+across tensor-parallel ranks the way its dense weights do. Each of the 2
+GPUs in a stage still holds close to that whole stage's experts. The
+`--enable-expert-parallel` flag makes no measured difference either.
+Getting this profile running needs a real fix: a smaller quantization of
+the full model, or a vllm-backport fix for MoE weight sharding under
+tensor parallel. No flag on this page will do it alone. Start these with
 [`run-glm53-int4-podman.sh`](scripts/run-glm53-int4-podman.sh) or
 [`run-glm53-int4-8gpu-podman.sh`](scripts/run-glm53-int4-8gpu-podman.sh).
 
