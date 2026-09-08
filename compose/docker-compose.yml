@@ -306,6 +306,7 @@ services:
       NCCL_PROTO: "Simple"
     volumes:
       - ${GLM_FLASH_MODEL:-/models/GLM-5.3-Flash-AWQ-W4A16}:/model
+      - ${HOME}/patches/vllm-backport/mtp-embed-from-checkpoint.py:/usr/local/lib/python3.12/dist-packages/vllm/v1/worker/gpu/spec_decode/eagle/utils.py:ro
       - ${HOME}/cache/glm53flash/vllm:/root/.cache/vllm
       - ${HOME}/cache/glm53flash/flashinfer:/root/.cache/flashinfer
       - ${HOME}/cache/glm53flash/triton:/root/.triton
@@ -364,6 +365,7 @@ services:
       VLLM_PP_LAYER_PARTITION: "16,15,14"
     volumes:
       - ${GLM_FLASH_MODEL:-/models/GLM-5.3-Flash-AWQ-W4A16}:/model
+      - ${HOME}/patches/vllm-backport/mtp-embed-from-checkpoint.py:/usr/local/lib/python3.12/dist-packages/vllm/v1/worker/gpu/spec_decode/eagle/utils.py:ro
       - ${HOME}/cache/glm53flash/vllm:/root/.cache/vllm
       - ${HOME}/cache/glm53flash/flashinfer:/root/.cache/flashinfer
       - ${HOME}/cache/glm53flash/triton:/root/.triton
@@ -396,6 +398,8 @@ services:
       - --enable-prompt-tokens-details
       - --compilation-config
       - '{"cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[1,2,4,8],"max_cudagraph_capture_size":8}'
+      - --speculative-config
+      - '{"method":"mtp","num_speculative_tokens":3}'
       - --enable-auto-tool-choice
       - --tool-call-parser
       - glm47
@@ -468,6 +472,7 @@ services:
       NCCL_PROTO: "Simple"
     volumes:
       - ${GLM_INT4_MODEL:-/models/GLM-5.3-AWQ-INT4}:/model
+      - ${HOME}/patches/vllm-backport/mtp-embed-from-checkpoint.py:/usr/local/lib/python3.12/dist-packages/vllm/v1/worker/gpu/spec_decode/eagle/utils.py:ro
       - ${HOME}/cache/glm53int4/vllm:/root/.cache/vllm
       - ${HOME}/cache/glm53int4/flashinfer:/root/.cache/flashinfer
       - ${HOME}/cache/glm53int4/triton:/root/.triton
@@ -488,7 +493,7 @@ services:
       - --max-model-len
       - "${GLM_MAXLEN:-1000000}"
       - --gpu-memory-utilization
-      - "0.85"
+      - "${GLM_INT4_UTIL:-0.95}"
       - --max-num-seqs
       - "16"
       - --max-num-batched-tokens
