@@ -175,48 +175,85 @@ mix does not unify into one KV cache spec under this connector.
 ## GLM-5.3
 
 Four profiles run GLM-5.3 on the `lazymio/vllm-backport:latest-sm80` image, two
-per quantization: one on 4 GPUs and one on all 8. All four use
-`--pipeline-parallel-size`, not tensor-parallel, for the same reason as the
-DeepSeek-V4 profiles: this hardware has no P2P over PCIe Gen2, and pipeline
-parallel moves far less data across that link.
+per quantization: one on 4 GPUs and one on all 8.
 
+### glm53flash: tensor-parallel on 4 GPUs
+
+`glm53flash` runs
+[wtdcode/GLM-5.3-Flash-AWQ-W4A16](https://huggingface.co/wtdcode/GLM-5.3-Flash-AWQ-W4A16)
+with `--tensor-parallel-size 4`, matching wtdcode's own recipe, tested working
+on this hardware. Start it with
+[`run-glm53-flash-podman.sh`](scripts/run-glm53-flash-podman.sh).
+
+An earlier version of this profile used `--pipeline-parallel-size 4` instead,
+for the same PCIe Gen2 reason as the DeepSeek-V4 profiles. That did not work:
 GLM-5.3's roughly 176 GB of weights do not split evenly across pipeline
-stages. On 4 GPUs, `--pipeline-parallel-size 4` overflows a single 64 GB card
-during warmup, before the engine even starts sizing the KV cache. This
-happens at any `--max-model-len`, including wtdcode's own conservative
-`524288`, so `glm53flash` and `glm53int4` (both `--pipeline-parallel-size 4`)
-do not start on this hardware. `--pipeline-parallel-size 8` spreads the same
-weights across all 8 GPUs instead, and tested working on this hardware:
-peak memory per card drops to about 52 GB out of 64 GB.
+stages. One stage overflowed a 64 GB card during warmup, before the engine
+even started sizing the KV cache. Tensor parallel splits every layer's
+weights evenly by construction, so it does not have this problem. It also
+matches the recipe wtdcode already tested for this model.
 
-- `glm53flash8gpu` runs
-  [wtdcode/GLM-5.3-Flash-AWQ-W4A16](https://huggingface.co/wtdcode/GLM-5.3-Flash-AWQ-W4A16)
-  on 8 GPUs. Tested working on this hardware. It sets `--max-model-len` to
-  `1000000` (`GLM_MAXLEN`), in place of wtdcode's `524288`. That value stays
-  close to the model's native ceiling of `1048576`, and it matches the limit
-  set on every other model in this file. Start it with
-  [`run-glm53-flash-8gpu-podman.sh`](scripts/run-glm53-flash-8gpu-podman.sh).
-  Single-stream decode measures 13 to 16 tokens per second on this profile,
-  well below the other models in this file. Every token crosses 7 inter-GPU
-  handoffs, over a Gen2 x4 link with no P2P, instead of the 3 handoffs that
-  `--pipeline-parallel-size 4` needs. `glm53flash8gpu` pays a larger version
-  of the same hop cost documented for `qwen8gpu` below. The MTP speculative
-  decoding in this profile barely helps. Mean acceptance length measures
-  around 1.12, with a 4 to 5% draft acceptance rate. Most draft tokens go to
-  waste, and each one still pays for a full round trip through all 8 stages.
-- `glm53int48gpu` runs
-  [cyankiwi/GLM-5.3-AWQ-INT4](https://huggingface.co/cyankiwi/GLM-5.3-AWQ-INT4),
-  a different quantization of the same base model, published outside the
-  vllm-backport project, on 8 GPUs. It uses the same launch configuration as
-  `glm53flash8gpu`. vllm-backport's support for this specific quantization is
-  untested, and this profile has not run on this hardware yet. Start it
-  with [`run-glm53-int4-8gpu-podman.sh`](scripts/run-glm53-int4-8gpu-podman.sh).
-- `glm53flash` and `glm53int4` keep the same launch configuration on
-  `--pipeline-parallel-size 4`. This is a placeholder for a future case where
-  only 4 GPUs are free, for example a second model running on the other
-  switch group. Neither starts as configured today. Fixing either needs a
-  lower `--gpu-memory-utilization`, a smaller `--max-num-batched-tokens`, or
-  fewer `cudagraph_capture_sizes`, and nobody has done that work yet.
+Tensor parallel fixed the overflow, but this profile then failed to fit a
+full 1,000,000-token context. `vllm`'s own log measured the KV cache math
+directly at each step:
+
+| change | available KV cache | estimated max context |
+|---|---|---|
+| baseline (TP4, `--gpu-memory-utilization 0.85`, `--max-num-batched-tokens 8192`) | 1.08 GiB | 71,424 |
+| `--max-num-batched-tokens` down to 2048 | 1.88 GiB | 140,544 |
+| add `--language-model-only` (drops the unused vision/video encoder cache) | 2.46 GiB | 188,928 |
+| `--gpu-memory-utilization` up to 0.90 | 5.63 GiB | 457,344 |
+
+A single 1,000,000-token request needs 12.04 GiB of KV cache on this model,
+so none of these changes reach it on 4 GPUs. `--max-model-len 500000`
+(`GLM_MAXLEN`) does fit, and this is the value the profile uses today.
+`--max-num-batched-tokens` and `cudagraph_capture_sizes` were only tested at
+the low end (2048 and `[1,2,4,8]`). Higher values, closer to wtdcode's
+original recipe, can fit within the memory this configuration freed up.
+Nobody tested that combination yet.
+
+Measured single-stream decode on this profile reaches about 47 tokens per
+second, close to 3 times faster than `glm53flash8gpu` below. MTP speculative
+decoding also works far better here: a 45% draft acceptance rate and a mean
+acceptance length of 2.35, against `glm53flash8gpu`'s 4 to 5% and 1.12. Use
+`glm53flash` over `glm53flash8gpu` unless a request needs more than 500,000
+tokens of context.
+
+### glm53flash8gpu: pipeline-parallel on 8 GPUs
+
+`glm53flash8gpu` runs the same model with `--pipeline-parallel-size 8`
+instead, spreading the same weights across all 8 GPUs. Tested working on this
+hardware: peak memory per card drops to about 52 GB out of 64 GB. That leaves enough room for `--max-model-len 1000000` (`GLM_MAXLEN`). That
+value stays close to the model's native ceiling of `1048576`, and it matches
+the limit set on every other model in this file. Start it with
+[`run-glm53-flash-8gpu-podman.sh`](scripts/run-glm53-flash-8gpu-podman.sh).
+
+Single-stream decode measures 13 to 16 tokens per second on this profile,
+well below `glm53flash`. Every token crosses 7 inter-GPU handoffs, over a
+Gen2 x4 link with no P2P, instead of the 3 handoffs that
+`--pipeline-parallel-size 4` needs. `glm53flash8gpu` pays a larger version of
+the same hop cost documented for `qwen8gpu` below. The MTP speculative
+decoding in this profile barely helps. Mean acceptance length measures
+around 1.12, with a 4 to 5% draft acceptance rate. Most draft tokens go to
+waste, and each one still pays for a full round trip through all 8 stages.
+`glm53flash` above wins on speed at every context length it can reach. When a
+request needs more than 500,000 tokens of context, use this profile instead.
+
+### glm53int4 and glm53int48gpu: the same model, a different quantization
+
+`glm53int4` and `glm53int48gpu` run
+[cyankiwi/GLM-5.3-AWQ-INT4](https://huggingface.co/cyankiwi/GLM-5.3-AWQ-INT4),
+a different quantization of the same base model, published outside the
+vllm-backport project. vllm-backport's support for this specific
+quantization is unconfirmed either way. `glm53int4` still uses
+`--pipeline-parallel-size 4`. Nobody applied the `glm53flash` fix above to it
+yet: tensor parallel, `--language-model-only`, a smaller
+`--max-num-batched-tokens`, and a higher `--gpu-memory-utilization`. It
+likely fails the same way `glm53flash` originally did. `glm53int48gpu` uses
+`--pipeline-parallel-size 8` and mirrors `glm53flash8gpu`'s working
+configuration, but nobody ran it on this hardware yet. Start them with
+[`run-glm53-int4-podman.sh`](scripts/run-glm53-int4-podman.sh) or
+[`run-glm53-int4-8gpu-podman.sh`](scripts/run-glm53-int4-8gpu-podman.sh).
 
 ## Persisted JIT and compile caches
 

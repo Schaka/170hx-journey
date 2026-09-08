@@ -269,21 +269,22 @@ services:
       - "8000"
       - --served-model-name
       - glm-5.3-flash
-      - --pipeline-parallel-size
+      - --tensor-parallel-size
       - "4"
+      - --language-model-only
       - --max-model-len
-      - "${GLM_MAXLEN:-524288}"
+      - "${GLM_MAXLEN:-500000}"
       - --gpu-memory-utilization
-      - "0.85"
+      - "0.90"
       - --max-num-seqs
-      - "16"
+      - "8"
       - --max-num-batched-tokens
-      - "8192"
+      - "2048"
       - --enable-prefix-caching
       - --enable-prompt-tokens-details
       - --disable-custom-all-reduce
       - --compilation-config
-      - '{"cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[1,2,4,8,16],"max_cudagraph_capture_size":16}'
+      - '{"cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[1,2,4,8],"max_cudagraph_capture_size":8}'
       - --speculative-config
       - '{"method":"mtp","num_speculative_tokens":3}'
       - --enable-auto-tool-choice
