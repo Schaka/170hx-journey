@@ -282,7 +282,6 @@ services:
       - "2048"
       - --enable-prefix-caching
       - --enable-prompt-tokens-details
-      - --disable-custom-all-reduce
       - --compilation-config
       - '{"cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[1,2,4,8],"max_cudagraph_capture_size":8}'
       - --speculative-config
@@ -339,6 +338,64 @@ services:
       - '{"cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[1,2,4,8,16],"max_cudagraph_capture_size":16}'
       - --speculative-config
       - '{"method":"mtp","num_speculative_tokens":3}'
+      - --enable-auto-tool-choice
+      - --tool-call-parser
+      - glm47
+      - --reasoning-parser
+      - glm45
+
+  glm53flash6gpu:
+    image: ${GLM_IMAGE:-docker.io/lazymio/vllm-backport:latest-sm80}
+    container_name: glm-5.3-flash-6gpu
+    profiles: ["glm53flash6gpu"]
+    devices:
+      - nvidia.com/gpu=0
+      - nvidia.com/gpu=1
+      - nvidia.com/gpu=2
+      - nvidia.com/gpu=3
+      - nvidia.com/gpu=4
+      - nvidia.com/gpu=5
+    shm_size: "16g"
+    ports:
+      - "8098:8000"
+    environment:
+      NCCL_ALGO: "Ring"
+      NCCL_PROTO: "Simple"
+      VLLM_PP_LAYER_PARTITION: "16,15,14"
+    volumes:
+      - ${GLM_FLASH_MODEL:-/models/GLM-5.3-Flash-AWQ-W4A16}:/model
+      - ${HOME}/cache/glm53flash/vllm:/root/.cache/vllm
+      - ${HOME}/cache/glm53flash/flashinfer:/root/.cache/flashinfer
+      - ${HOME}/cache/glm53flash/triton:/root/.triton
+      - ${HOME}/cache/glm53flash/nv:/root/.nv
+      - ${HOME}/cache/glm53flash/humming:/root/.humming
+      - ${HOME}/cache/glm53flash/cupy:/root/.cupy
+      - ${HOME}/cache/glm53flash/tilelang:/root/.tilelang
+    command:
+      - /model
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --served-model-name
+      - glm-5.3-flash
+      - --tensor-parallel-size
+      - "2"
+      - --pipeline-parallel-size
+      - "3"
+      - --language-model-only
+      - --max-model-len
+      - "${GLM_MAXLEN:-500000}"
+      - --gpu-memory-utilization
+      - "0.88"
+      - --max-num-seqs
+      - "8"
+      - --max-num-batched-tokens
+      - "2048"
+      - --enable-prefix-caching
+      - --enable-prompt-tokens-details
+      - --compilation-config
+      - '{"cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[1,2,4,8],"max_cudagraph_capture_size":8}'
       - --enable-auto-tool-choice
       - --tool-call-parser
       - glm47

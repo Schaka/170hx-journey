@@ -174,8 +174,9 @@ mix does not unify into one KV cache spec under this connector.
 
 ## GLM-5.3
 
-Four profiles run GLM-5.3 on the `lazymio/vllm-backport:latest-sm80` image, two
-per quantization: one on 4 GPUs and one on all 8.
+Five profiles run GLM-5.3 on the `lazymio/vllm-backport:latest-sm80` image.
+The Flash quantization has three profiles, on 4, 6, and 8 GPUs. The INT4
+quantization has two, on 4 and 8 GPUs.
 
 ### glm53flash: tensor-parallel on 4 GPUs
 
@@ -218,6 +219,40 @@ decoding also works far better here: a 45% draft acceptance rate and a mean
 acceptance length of 2.35, against `glm53flash8gpu`'s 4 to 5% and 1.12. Use
 `glm53flash` over `glm53flash8gpu` unless a request needs more than 500,000
 tokens of context.
+
+### glm53flash6gpu: tensor and pipeline parallel on 6 GPUs, no MTP
+
+`glm53flash6gpu` runs the same Flash checkpoint with `--tensor-parallel-size
+2` and `--pipeline-parallel-size 3`. It splits the model into 3 pipeline
+stages of 2 GPUs each. Start it with
+[`run-glm53-flash-6gpu-podman.sh`](scripts/run-glm53-flash-6gpu-podman.sh).
+
+This layout keeps every all-reduce inside one pair of GPUs. vLLM's custom
+all-reduce kernel only works within a pair. It refuses to run across more
+than 2 PCIe-only GPUs, so `glm53flash` (TP4) and `glm53flash8gpu` (PP8) both
+fall back to NCCL's plain all-reduce instead.
+
+The 3 pipeline stages split unevenly by default. The model spreads 45 hidden
+layers across the stages, and the last stage also carries the MTP head and
+the LM head. Those two add fixed memory on top of its share of the layers.
+Setting `VLLM_PP_LAYER_PARTITION=16,15,14`
+puts fewer layers on the last stage, which balances memory across all 3
+stages. Without it, this profile fails with an out-of-memory error before it
+starts sizing the KV cache, the same problem `glm53flash` hit at
+`--pipeline-parallel-size 4`.
+
+This profile runs without MTP speculative decoding. vLLM's MTP drafter needs
+a correct copy of the model's embedding table on every pipeline stage. The
+vllm-backport image on this hardware does not carry that fix. With MTP on, the draft acceptance rate measures 0%. Every draft token gets
+rejected, and each one still pays for a full round trip through the
+pipeline. `glm53flash` above avoids this problem because it uses no pipeline
+parallel at all.
+
+Single-stream decode on this profile measures about 33 tokens per second,
+faster than `glm53flash8gpu`'s 13 to 16, but slower than `glm53flash`'s 47.
+`glm53flash` stays the fastest choice within its 500,000-token context
+limit. When a footprint wider than 4 GPUs matters more than the speed gap,
+use `glm53flash6gpu` instead.
 
 ### glm53flash8gpu: pipeline-parallel on 8 GPUs
 
