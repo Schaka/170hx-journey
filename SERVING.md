@@ -308,29 +308,40 @@ the vllm-backport project. The checkpoint is 455 GB on disk.
 is 455 GB, so this profile cannot load the model at all, on any parallelism
 setting.
 
-`glm53int48gpu` requests all 8 GPUs, 512 GB total, and does not start yet
-either. `--gpu-memory-utilization` sets a budget for the KV cache, sized
-after weight loading finishes. It does not limit weight loading itself, so
-raising it from 0.85 to 0.95, then to 0.98, made no difference.
-
-With `--pipeline-parallel-size 8` (one GPU per stage), a single 64 GB card
-cannot hold a full pipeline stage of this model. There is no safety margin
-left over. The last stage carries a separate, non-tied `lm_head` and the grafted
-MTP layer, on top of its regular hidden layers. vLLM also allocates a
-temporary buffer once per GPU, to repack the quantized MoE weights into
-Marlin's kernel format. Together these push every stage past 63 GB, before
-the KV cache is even sized.
-
-Adding `--tensor-parallel-size 2` on top of `--pipeline-parallel-size 4`
-does not fix this. This checkpoint's MoE weight format does not shard
-across tensor-parallel ranks the way its dense weights do. Each of the 2
-GPUs in a stage still holds close to that whole stage's experts. The
-`--enable-expert-parallel` flag makes no measured difference either.
-Getting this profile running needs a real fix: a smaller quantization of
-the full model, or a vllm-backport fix for MoE weight sharding under
-tensor parallel. No flag on this page will do it alone. Start these with
-[`run-glm53-int4-podman.sh`](scripts/run-glm53-int4-podman.sh) or
+`glm53int48gpu` requests all 8 GPUs, 512 GB total, and works, using
+`--tensor-parallel-size 2` on top of `--pipeline-parallel-size 4` (4 stages
+of 2 GPUs each), plus `--enable-expert-parallel`. Expert parallel splits
+this checkpoint's MoE experts across the 2 GPUs in each stage, halving the
+per-GPU expert weight. Without it, each of the 2 GPUs in a stage holds close to the whole stage's
+experts. The model does not fit even on 2 GPUs per stage that way. `VLLM_PP_LAYER_PARTITION=21,21,21,15` gives the last stage
+fewer layers, since it also carries a separate, non-tied `lm_head` and the
+grafted MTP layer. `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`
+avoids an allocator fragmentation failure during Marlin weight repacking.
+Start it with
 [`run-glm53-int4-8gpu-podman.sh`](scripts/run-glm53-int4-8gpu-podman.sh).
+
+This profile also needs three patch files, all under
+[`patches/vllm-backport/`](patches/vllm-backport/), mounted read-only over
+the vllm-backport image:
+
+| patch | fixes |
+|---|---|
+| `mtp-embed-from-checkpoint.py` | the same MTP-under-pipeline-parallel fix described above |
+| `deepseek_v32-fused-q-sm80-fp8.py` | this model's own query-preprocessing kernel casts to a Triton fp8 type unsupported below SM89. Rewrites the cast to a software encoder that produces the same byte. Also changes one buffer's dtype, so Triton never has to declare the unsupported type at all |
+| `mla-attention-sparse-mha-no-prefill.py` | a one-line fix. This model's attention backend has no dense-MHA prefill path, so it never sets a `prefill` field. A shared vLLM code path expects that field on every metadata type |
+
+`--gpu-memory-utilization` does not limit weight loading itself. It only
+sets a budget for the KV cache, sized after weight loading finishes.
+Raising it from 0.85 towards 0.97 made no difference to whether the model
+loads. It only changed how much KV cache was left over afterward.
+
+The real limit on this hardware is memory, not software. Weight loading
+alone uses 57 to 59 GB per GPU, out of 64. `--max-model-len` above roughly
+70,000 fails to find enough KV cache memory, even at
+`--gpu-memory-utilization 0.97`. `GLM_MAXLEN` defaults to `65536`, tested
+working with correct output. The model's native context limit is
+1,048,576, far beyond what this checkpoint's memory footprint leaves room
+for on this hardware.
 
 ## Persisted JIT and compile caches
 

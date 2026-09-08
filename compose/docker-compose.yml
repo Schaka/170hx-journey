@@ -470,11 +470,13 @@ services:
     environment:
       NCCL_ALGO: "Ring"
       NCCL_PROTO: "Simple"
-      VLLM_PP_LAYER_PARTITION: "${GLM_INT4_PARTITION:-22,20,20,16}"
+      VLLM_PP_LAYER_PARTITION: "${GLM_INT4_PARTITION:-21,21,21,15}"
       PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
     volumes:
       - ${GLM_INT4_MODEL:-/models/GLM-5.3-AWQ-INT4}:/model
       - ${HOME}/patches/vllm-backport/mtp-embed-from-checkpoint.py:/usr/local/lib/python3.12/dist-packages/vllm/v1/worker/gpu/spec_decode/eagle/utils.py:ro
+      - ${HOME}/patches/vllm-backport/deepseek_v32-fused-q-sm80-fp8.py:/usr/local/lib/python3.12/dist-packages/vllm/models/deepseek_v32/common/kernels.py:ro
+      - ${HOME}/patches/vllm-backport/mla-attention-sparse-mha-no-prefill.py:/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/attention/mla_attention.py:ro
       - ${HOME}/cache/glm53int4/vllm:/root/.cache/vllm
       - ${HOME}/cache/glm53int4/flashinfer:/root/.cache/flashinfer
       - ${HOME}/cache/glm53int4/triton:/root/.triton
@@ -495,13 +497,13 @@ services:
       - --pipeline-parallel-size
       - "4"
       - --max-model-len
-      - "${GLM_MAXLEN:-1000000}"
+      - "${GLM_MAXLEN:-65536}"
       - --gpu-memory-utilization
-      - "${GLM_INT4_UTIL:-0.95}"
+      - "${GLM_INT4_UTIL:-0.97}"
       - --max-num-seqs
       - "16"
       - --max-num-batched-tokens
-      - "${GLM_INT4_BATCHED_TOKENS:-8192}"
+      - "${GLM_INT4_BATCHED_TOKENS:-2048}"
       - --enable-expert-parallel
       - --enable-prefix-caching
       - --enable-prompt-tokens-details
