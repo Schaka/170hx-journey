@@ -494,33 +494,55 @@ dense and cost 0.4 to 0.8 GB each instead of 4.8 GB. Stage 7 takes 7 layers
 because it also holds `lm_head` and the whole MTP block.
 
 The KV cache uses the packed `fp8_ds_mla` layout, through the same patches
-and the same `TRITON_MLA_SPARSE` backend as `glm53int48gpu` above. MTP
-speculative decoding is on at 3 draft tokens, which needs the
-`mtp-embed-from-checkpoint.py` patch as well, for 6 patch files in total.
+and the same `TRITON_MLA_SPARSE` backend as `glm53int48gpu` above.
+Speculative decoding is off. See the section below for why.
 
 #### Measured throughput
 
 Aggregate completion throughput, 256-token outputs, diverse short prompts:
 
-| concurrent requests | without MTP | with MTP, 3 draft tokens |
+| concurrent requests | aggregate tok/s | per stream |
 |---|---|---|
-| 1 | 24.1 | 41 to 44 |
-| 4 | 70.6 | 71 to 88 |
-| 8 | 73.7 | 90.7 |
-
-MTP nearly doubles single-stream decode. Draft acceptance is 79%, 57%, and
-39% at the three draft positions, for 2.76 tokens per model step. The MTP
-range is wide because acceptance depends on the prompt.
+| 1 | 24.1 | 24.1 |
+| 4 | 70.6 | 17.7 |
+| 8 | 73.7 | 9.2 |
 
 Prefill runs at about 1,330 tokens per second. A cold 923,121-token prompt
 therefore takes 695 seconds. Treat the full million as a load-once batch
 mode, not an interactive one. The prefix cache makes every later turn on the
 same context cheap.
 
-`--max-num-batched-tokens 8192` matters here. Speculative decoding otherwise
-drops the prefill chunk to 2048 tokens. The CUDA graph capture sizes run up
-to 48 for the same reason. At 3 draft tokens and 8 sequences a decode batch
-is 32 tokens wide, which the old ceiling of 8 pushed back to eager.
+The CUDA graph capture sizes run up to 48 rather than the default 8, so
+larger decode batches keep their graphs.
+
+#### MTP speculative decoding does not work here yet
+
+MTP is worth a lot on this model. At 3 draft tokens it takes single-stream
+decode from 24.1 to about 43 tokens per second, and 8-stream from 73.7 to
+90.7. Draft acceptance is healthy at 79%, 57%, and 39% across the three
+draft positions, which is 2.76 tokens per model step.
+
+It is off because it crashes on any prompt long enough to need several
+prefill chunks. The failure is in vLLM, at
+`vllm/v1/worker/gpu/model_runner.py`:
+
+```
+assert (num_scheduled_tokens_np >= num_logits).all()
+```
+
+The cause is the one
+[bayley/vllm-170hx-glm5](https://github.com/bayley/vllm-170hx-glm5)
+documents. Under pipeline parallel, several batches of one request are in
+flight at once. Leftover `spec_token_ids` from an older batch make the
+scheduler give the request more tokens than the step can hold. The crash
+reproduces from 32,000 tokens upward. It is not caused by async scheduling,
+by the prefill chunk budget, or by prefix caching.
+
+`scheduler-pp-spec-stale-drafts.py` ports bayley's stale-draft guard. It
+drops draft tokens that did not ride on the request's own latest verified
+token. That guard alone does not fix the crash. bayley also serializes a
+request against its own in-flight steps in the scheduler, and that part is
+not ported. Enable MTP with `--speculative-config` only for short prompts.
 
 ## Persisted JIT and compile caches
 

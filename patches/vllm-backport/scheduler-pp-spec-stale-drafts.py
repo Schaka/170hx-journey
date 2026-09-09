@@ -2326,7 +2326,8 @@ class Scheduler(SchedulerInterface):
             if (
                 self.use_pp
                 and not self.scheduler_config.async_scheduling
-                and request.num_computed_tokens != request.num_tokens - 1
+                and request.num_computed_tokens
+                != request.num_tokens + request.num_output_placeholders
             ):
                 # 170hx-journey, from bayley/vllm-170hx-glm5 patch_mtp_pp.py:
                 # under pipeline parallel with sync scheduling, several batches

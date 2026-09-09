@@ -543,6 +543,7 @@ services:
       OMP_NUM_THREADS: "1"
     volumes:
       - ${GLM_MIX_MODEL:-/models/GLM-5.3-Int4-Int8Mix}:/model
+      - ${HOME}/patches/vllm-backport/scheduler-pp-spec-stale-drafts.py:/usr/local/lib/python3.12/dist-packages/vllm/v1/core/sched/scheduler.py:ro
       - ${HOME}/patches/vllm-backport/mtp-embed-from-checkpoint.py:/usr/local/lib/python3.12/dist-packages/vllm/v1/worker/gpu/spec_decode/eagle/utils.py:ro
       - ${HOME}/patches/vllm-backport/deepseek_v32-fused-q-sm80-fp8.py:/usr/local/lib/python3.12/dist-packages/vllm/models/deepseek_v32/common/kernels.py:ro
       - ${HOME}/patches/vllm-backport/mla-attention-sparse-mha-no-prefill.py:/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/attention/mla_attention.py:ro
@@ -579,17 +580,13 @@ services:
       - --max-model-len
       - "${GLM_MIX_MAXLEN:-1048576}"
       - --gpu-memory-utilization
-      - "${GLM_MIX_UTIL:-0.97}"
+      - "${GLM_MIX_UTIL:-0.95}"
       - --max-num-seqs
       - "8"
-      - --max-num-batched-tokens
-      - "${GLM_MIX_BATCHED_TOKENS:-8192}"
       - --enable-prefix-caching
       - --enable-prompt-tokens-details
       - --compilation-config
       - '{"cudagraph_capture_sizes":[1,2,4,8,16,24,32,48],"max_cudagraph_capture_size":48}'
-      - --speculative-config
-      - '{"method":"mtp","num_speculative_tokens":3}'
       - --enable-auto-tool-choice
       - --tool-call-parser
       - glm47
