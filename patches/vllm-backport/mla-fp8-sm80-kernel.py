@@ -249,7 +249,12 @@ def _sparse_mla_compute_tile_fp8(
             other=-1,
         )
         mask_kv = (indices >= 0) & (indices < seq_kv)
-        safe_idx = tl.where(mask_kv, indices, 0)
+        # int64 offsets. The byte view has a 656-element stride, so an int32
+        # `index * stride` overflows above ~3.27M KV slots and faults with
+        # Xid 31, even though every index VALUE passes the mask above. Credit
+        # promisezackr/glm53-flash-170hx-pp8, which hit this on the bf16
+        # kernel at 4.19M slots.
+        safe_idx = tl.where(mask_kv, indices, 0).to(tl.int64)
 
         # Group scales: [BLOCK_N] each, with the fp16-decode bias folded in.
         sc_base = kv_f32 + safe_idx * K_F32_STRIDE + K_F32_SCALE_OFF

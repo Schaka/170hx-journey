@@ -452,6 +452,14 @@ the vllm-backport image:
 | `mla-fp8-sm80-kernel.py` | the sparse MLA attention kernel that reads the packed 656-byte fp8 cache without naming an fp8 Triton type. Vendored from [bayley/vllm-170hx-glm5](https://github.com/bayley/vllm-170hx-glm5) |
 | `triton-mla-sparse-fp8.py` | declares `fp8_ds_mla` supported on the `TRITON_MLA_SPARSE` backend and routes decode to the kernel above |
 | `indexer-prefill-buffer-cap.py` | the sparse indexer sizes its prefill gather workspace at 40 tokens per model token. That is a heuristic ceiling, not a requirement. The cap returns about 850 MB per GPU to the KV cache |
+| `scheduler-pp-spec-stale-drafts.py` | drops draft tokens that did not ride on a request's own latest verified token. Only matters with speculative decoding on. See the MTP section below |
+
+The fp8 kernel computes its cache offsets in int64. An int32 offset
+overflows above about 3.27 million KV slots and faults with Xid 31, even
+though every index value is in range. This box runs 1.4 million slots today,
+so the cast is headroom rather than a live fix. Credit
+[promisezackr/glm53-flash-170hx-pp8](https://github.com/promisezackr/glm53-flash-170hx-pp8),
+which hit the same overflow on the bf16 kernel.
 
 ### glm53mix8gpu: the full GLM-5.3 at 1,048,576 tokens of context
 
@@ -503,17 +511,19 @@ Aggregate completion throughput, 256-token outputs, diverse short prompts:
 
 | concurrent requests | aggregate tok/s | per stream |
 |---|---|---|
-| 1 | 24.1 | 24.1 |
-| 4 | 70.6 | 17.7 |
-| 8 | 73.7 | 9.2 |
+| 1 | 24.6 | 24.6 |
+| 4 | 73.0 | 18.3 |
+| 8 | 103.6 | 13.0 |
 
-Prefill runs at about 1,330 tokens per second. A cold 923,121-token prompt
-therefore takes 695 seconds. Treat the full million as a load-once batch
-mode, not an interactive one. The prefix cache makes every later turn on the
-same context cheap.
+The CUDA graph capture sizes run up to 48 rather than the default 8. That
+alone lifts the 8-stream number from 73.7 to 103.6, because a decode batch
+wider than 8 otherwise falls back to eager.
 
-The CUDA graph capture sizes run up to 48 rather than the default 8, so
-larger decode batches keep their graphs.
+Prefill runs at 1,330 to 2,370 tokens per second, faster on longer prompts.
+A 204,819-token prompt takes 86 seconds and a cold 923,121-token prompt
+takes 695 seconds. Treat the full million as a load-once batch mode, not an
+interactive one. The prefix cache makes every later turn on the same context
+cheap.
 
 #### MTP speculative decoding does not work here yet
 
