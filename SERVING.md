@@ -519,6 +519,10 @@ The CUDA graph capture sizes run up to 48 rather than the default 8. That
 alone lifts the 8-stream number from 73.7 to 103.6, because a decode batch
 wider than 8 otherwise falls back to eager.
 
+Discard the first sweep after a restart. It reads 20 to 25% low while Triton
+autotunes and the graphs warm up. The 8-stream figure settles at 101 to 103
+over the next runs, and single-stream at 24.7.
+
 Prefill runs at 1,330 to 2,370 tokens per second, faster on longer prompts.
 A 204,819-token prompt takes 86 seconds and a cold 923,121-token prompt
 takes 695 seconds. Treat the full million as a load-once batch mode, not an
