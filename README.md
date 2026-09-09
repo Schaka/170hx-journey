@@ -32,3 +32,11 @@ change. `git log` and `git blame` already keep that history.
   tuning reference.
 - [wtdcode/vllm-backport](https://github.com/wtdcode/vllm-backport): the Qwen3.8,
   GLM-5.3, and alternative DeepSeek-V4 serving stack in [SERVING.md](SERVING.md).
+- [bayley/vllm-170hx-glm5](https://github.com/bayley/vllm-170hx-glm5): the SM80
+  fp8 sparse-MLA kernel this box vendors, the pipeline-parallel layout for the
+  full GLM-5.3, and the fix for stale draft tokens under pipeline parallel. See
+  [SERVING.md](SERVING.md).
+- [promisezackr/glm53-flash-170hx-pp8](https://github.com/promisezackr/glm53-flash-170hx-pp8):
+  a second 8-card GLM-5.3-Flash port, on NVFP4 weights with a DFlash2 drafter.
+- [PixelML/club-170hx](https://github.com/PixelML/club-170hx): community recipes,
+  acceptance tests, and cooling and power guidance for this card.
