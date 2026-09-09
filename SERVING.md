@@ -383,13 +383,27 @@ tokens of context.
 #### Measured throughput
 
 Every number below comes from `cyankiwi/GLM-5.3-AWQ-INT4` on all 8 GPUs, in
-the `glm53int48gpu` configuration above. The exact settings are
-`--tensor-parallel-size 2`, `--pipeline-parallel-size 4`,
-`--enable-expert-parallel`, `VLLM_PP_LAYER_PARTITION=20,20,20,18`,
-`--kv-cache-dtype fp8_ds_mla`, `--attention-backend TRITON_MLA_SPARSE`,
-`--block-size 64`, `--dtype bfloat16`, `--max-model-len 262144`,
-`--gpu-memory-utilization 0.97`, `--enable-prefix-caching`, and no
-speculative decoding.
+the `glm53int48gpu` configuration above. Speculative decoding is off. This
+is the exact configuration:
+
+```
+VLLM_PP_LAYER_PARTITION=20,20,20,18
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+GLM53_IDX_PREFILL_BUF_TOKENS=4000000
+
+--tensor-parallel-size 2
+--pipeline-parallel-size 4
+--enable-expert-parallel
+--disable-custom-all-reduce
+--attention-backend TRITON_MLA_SPARSE
+--kv-cache-dtype fp8_ds_mla
+--block-size 64
+--dtype bfloat16
+--max-model-len 262144
+--gpu-memory-utilization 0.97
+--max-num-seqs 8
+--enable-prefix-caching
+```
 
 Aggregate completion throughput, 256-token outputs, diverse short prompts:
 
