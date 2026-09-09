@@ -382,6 +382,15 @@ tokens of context.
 
 #### Measured throughput
 
+Every number below comes from `cyankiwi/GLM-5.3-AWQ-INT4` on all 8 GPUs, in
+the `glm53int48gpu` configuration above. The exact settings are
+`--tensor-parallel-size 2`, `--pipeline-parallel-size 4`,
+`--enable-expert-parallel`, `VLLM_PP_LAYER_PARTITION=20,20,20,18`,
+`--kv-cache-dtype fp8_ds_mla`, `--attention-backend TRITON_MLA_SPARSE`,
+`--block-size 64`, `--dtype bfloat16`, `--max-model-len 262144`,
+`--gpu-memory-utilization 0.97`, `--enable-prefix-caching`, and no
+speculative decoding.
+
 Aggregate completion throughput, 256-token outputs, diverse short prompts:
 
 | concurrent requests | aggregate tok/s | per stream |
