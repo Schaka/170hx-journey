@@ -380,6 +380,41 @@ trade context for decode speed. Batch-1 decode runs at about 21 tokens per
 second without it. Prefill runs at about 1,340 tokens per second at 220,000
 tokens of context.
 
+#### Measured throughput
+
+Aggregate completion throughput, 256-token outputs, diverse short prompts:
+
+| concurrent requests | aggregate tok/s | per stream |
+|---|---|---|
+| 1 | 21.5 | 21.5 |
+| 2 | 41.3 | 20.7 |
+| 4 | 67.0 | 16.8 |
+| 8 | 77.0 | 9.6 |
+| 16 | 69.2 | 4.3 |
+
+Throughput peaks near 8 concurrent requests. Past that it drops, so
+`--max-num-seqs 8` is the right ceiling. Four parallel sessions is the point
+where each one still feels responsive.
+
+Decode speed barely changes with context depth, which is what the sparse
+top-k attention buys. With a warm prefix cache:
+
+| workload | aggregate tok/s | per stream |
+|---|---|---|
+| 4 sessions at 64,444 tokens | 62.1 | 15.5 |
+| 2 sessions at 139,955 tokens | 37.8 | 18.9 |
+
+Prefill is the slow part. A cold 221,576-token prompt takes 165 seconds, at
+1,343 tokens per second. Four cold 64,444-token prompts take 201 seconds
+together, at 1,316 tokens per second. The prefix cache then makes a repeat
+turn on the same context almost free: the same four sessions replay in 16
+seconds.
+
+Do not read these long-context numbers as one measurement. Prefills
+serialize, so a single pass over cold prompts charges every later prefill to
+the first stream's decode window. The table above measures decode on a
+second, cache-warm pass.
+
 #### The patch files
 
 This profile needs five patch files, all under
