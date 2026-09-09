@@ -452,6 +452,15 @@ the vllm-backport image:
 | `mla-fp8-sm80-kernel.py` | the sparse MLA attention kernel that reads the packed 656-byte fp8 cache without naming an fp8 Triton type. Vendored from [bayley/vllm-170hx-glm5](https://github.com/bayley/vllm-170hx-glm5) |
 | `triton-mla-sparse-fp8.py` | declares `fp8_ds_mla` supported on the `TRITON_MLA_SPARSE` backend and routes decode to the kernel above |
 | `indexer-prefill-buffer-cap.py` | the sparse indexer sizes its prefill gather workspace at 40 tokens per model token. That is a heuristic ceiling, not a requirement. The cap returns about 850 MB per GPU to the KV cache |
+
+Ampere has no fp8 hardware, and Triton refuses to name the `fp8e4nv` type
+below SM89. Triton also types a kernel parameter from the tensor dtype it
+receives. A `float8_e4m3fn` view therefore fails compilation at the kernel
+signature. Triton reports this as `at 1:0`. No runtime branch has to reach
+the cast.
+Keep every such buffer `torch.uint8`. On the host, once the kernel returns,
+call `.view(torch.float8_e4m3fn)`. Both dtypes are 1 byte, so the view costs
+nothing.
 | `scheduler-pp-spec-stale-drafts.py` | drops draft tokens that did not ride on a request's own latest verified token. Only matters with speculative decoding on. See the MTP section below |
 
 The fp8 kernel computes its cache offsets in int64. An int32 offset
@@ -488,6 +497,12 @@ At 18.4 GB it leaves that stage no room to repack its own weights. The
 cyankiwi checkpoint therefore cannot run 8 pipeline stages at all. The
 Tech2wild checkpoint quantizes every layer from 1 to 77. All 8 stages then
 carry 44 to 49 GB, and each one keeps 13 GB or more free for the KV cache.
+
+Check this before you trust any new quantization of this model. Read
+`quantization_config.ignore` in `config.json` and count the entries per
+layer. A layer with about 780 ignored tensors keeps all 256 experts in
+bf16 and takes 18.4 GB. A layer with 6 to 11 entries is quantized and takes
+4.8 GB.
 
 #### Layout
 
@@ -557,6 +572,21 @@ drops draft tokens that did not ride on the request's own latest verified
 token. That guard alone does not fix the crash. bayley also serializes a
 request against its own in-flight steps in the scheduler, and that part is
 not ported. Enable MTP with `--speculative-config` only for short prompts.
+
+Before you port more of that work, note one detail. bayley identifies a
+settled request by `num_computed_tokens == num_tokens - 1`. This
+vllm-backport image counts the just-sampled token as computed, so a settled
+request here has `num_computed_tokens == num_tokens`. Ported verbatim, the
+guard matches nothing, drops every draft, and turns MTP off while still
+paying its cost. Single-stream then reads about 16 tokens per second,
+below the 24.7 of plain decoding.
+
+[promisezackr/glm53-flash-170hx-pp8](https://github.com/promisezackr/glm53-flash-170hx-pp8)
+is the closer donor for that port. It runs the same `v1/worker/gpu/` layout
+as this image. Its patch 0007 replaces boolean-mask draft indexing with a
+Triton row-scatter, worth 2x single-stream. The mask path calls `nonzero()`,
+which forces a device sync on every non-last rank every step. Patch 0021
+adds adaptive per-request draft truncation. Patch 0022 removes it again.
 
 ## Persisted JIT and compile caches
 
