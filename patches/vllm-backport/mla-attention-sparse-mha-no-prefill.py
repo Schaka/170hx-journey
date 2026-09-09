@@ -351,7 +351,12 @@ def _canonicalize_sparse_mla_kv_cache_dtype(
     kv_cache_dtype: CacheDType,
 ) -> CacheDType:
     backend_name = attn_backend.get_name()
-    if backend_name == "FLASHMLA_SPARSE" and is_quantized_kv_cache(kv_cache_dtype):
+    # 170hx-journey: TRITON_MLA_SPARSE reads the same packed 656-byte layout
+    # on SM80, so `--kv-cache-dtype fp8` means fp8_ds_mla there too.
+    if backend_name in (
+        "FLASHMLA_SPARSE",
+        "TRITON_MLA_SPARSE",
+    ) and is_quantized_kv_cache(kv_cache_dtype):
         return "fp8_ds_mla"
     if backend_name == "FLASHINFER_MLA_SPARSE_SM120" and kv_cache_dtype in (
         "auto",
@@ -779,8 +784,17 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         if attn_metadata is None:
             # During the profile run try to simulate to worse case output size
             # for `self.kv_b_proj(kv_c_normed)` in `_compute_prefill_context`
-            # since this can be large
-            _ = torch.empty(
+            # since this can be large.
+            # 170hx-journey: the sparse MQA-only backends (TRITON_MLA_SPARSE
+            # and the XPU base it shares) report every token as a decode
+            # token, so num_mha_tokens is identically 0 and
+            # _compute_prefill_context is dead code. This reserve is ~3.5 GiB
+            # per rank and only shrinks the KV cache.
+            _sparse_mqa_only = self.attn_backend.get_name() in (
+                "TRITON_MLA_SPARSE",
+                "XPU_MLA_SPARSE",
+            )
+            _ = None if _sparse_mqa_only else torch.empty(
                 (
                     self.chunked_prefill_workspace_size,
                     self.num_heads,

@@ -504,12 +504,19 @@ def fused_norm_rope(
             mla_entry_stride = u8_cache.stride(1)
             mla_ds_scale_view = u8_cache.view(torch.float32)
             mla_ds_rope_view = u8_cache.view(torch.bfloat16)
-            mla_kv_cache = u8_cache.view(torch.float8_e4m3fn)
+            # 170hx-journey: pass the uint8 view, not a float8_e4m3fn one.
+            # Triton reads the tensor dtype to type the kernel parameter, and
+            # fp8e4nv is unsupported below SM89, so the view fails compilation
+            # at the kernel signature. Every store below writes a byte built by
+            # _encode_e4m3fn_u8, so a uint8 pointer is the correct type.
+            mla_kv_cache = u8_cache
         else:
             mla_block_stride = mla_kv_cache.stride(0)
             mla_entry_stride = mla_kv_cache.stride(1)
-            if mla_cache_fp8 and mla_kv_cache.dtype == torch.uint8:
-                mla_kv_cache = mla_kv_cache.view(torch.float8_e4m3fn)
+            if mla_cache_fp8 and mla_kv_cache.dtype == torch.float8_e4m3fn:
+                # Same reason as the fp8_ds_mla branch above: keep the pointer
+                # typed uint8 for Triton.
+                mla_kv_cache = mla_kv_cache.view(torch.uint8)
         if mla_k_scale is None:
             mla_k_scale = torch.ones(1, dtype=torch.float32, device=device)
     else:
