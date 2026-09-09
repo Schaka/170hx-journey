@@ -69,7 +69,12 @@ pci=disable_acs_redir=0000:b0:0b.0
 pci=disable_acs_redir=0000:b0:11.0
 pci=disable_acs_redir=0000:b0:13.0
 rd.driver.blacklist=nouveau rd.driver.blacklist=nova-core
+iomem=relaxed
 ```
+
+The `iomem=relaxed` argument lets userspace map GPU BAR0. The 170tune undervolt
+writes clock and voltage registers through that mapping. See the power section in
+[HARDWARE.md](HARDWARE.md).
 
 The `disable_acs_redir` list names the two GPU-side root ports (`85:00.0`, `ae:00.0`)
 and all eight PLX switch downstream ports, one per card. The `pci=hpmmioprefsize=2T`

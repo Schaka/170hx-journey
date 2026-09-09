@@ -49,28 +49,86 @@ If the output reads `Active` on a card that is not thermally limited or power li
 the platform asserts `PWRBRK#`. To fix this, place Kapton tape over pin B30 on the
 card edge connector. You can also use a riser that does not route B30.
 
-## Power limit
+## Power limit and clock tuning
 
-Each card ships with a 250 W limit and a 300 W hardware maximum. Under load a
-card draws short peaks above 250 W. A limit of **200 W** on every card bounds
-that draw. It bounds the heat and the load on the two power supplies and
-their cables with it.
+Each card ships with a 250 W limit and a 300 W hardware maximum. This host
+runs every card at a 175 W limit, an undervolt, and a 1470 MHz clock ceiling.
+Under that profile a card draws 38 to 96 W while it serves, so the limit is a
+guard rail and not a brake.
 
-200 W costs no measured throughput. The cards hold 1470 to 1485 MHz under
-load at 200 W, against 1490 MHz uncapped. Single-stream decode and prefill
-are identical at 175 W, 200 W, and 250 W. The concurrent-decode benchmark
-swings too widely to separate the three, so 200 W is the conservative pick.
+### The tune
 
-[`scripts/gpu-power-limit.sh`](scripts/gpu-power-limit.sh) sets the limit on
-every card. `gpu-power-limit.service` runs it at boot and is enabled on this
-host. The limit lives in NVML, not the VBIOS, so a card that boots without
-the service runs at its stock 250 W.
+[cachenetics/170tune](https://github.com/cachenetics/170tune) writes the clock
+and voltage registers through GPU BAR0. The kernel command line must carry
+`iomem=relaxed` for that mapping to work. See
+[KERNEL.md](KERNEL.md#kernel-command-line).
 
-Deeper tuning needs
-[cachenetics/170tune](https://github.com/cachenetics/170tune), which
-undervolts and tunes the HBM clock through live BAR0 register writes. Two
-things block it on this host today. The kernel command line has no
-`iomem=relaxed`, so userspace cannot map BAR0. There is also no `nvcc`, so
-the tool cannot build the bit-exact compute check that its qualification
-gate needs. The failure mode of a bad undervolt on this card is wrong bytes,
-not a crash, so do not run one without that gate.
+The tool needs `nvcc` to build its bit-exact compute check. This host has CUDA
+13.3 from the `cuda-fedora44-x86_64` repository. That `nvcc` refuses a host
+compiler above GCC 15, so the build needs `gcc15` and `gcc15-c++`, and this
+environment variable:
+
+```
+NVCC_PREPEND_FLAGS="-ccbin /usr/bin/g++-15"
+```
+
+### Per-card offsets
+
+The cards are not one bin. Cards 1 and 3 report a maximum SM clock of 1785
+MHz. The other six report 1890 MHz. The two slower cards need a smaller
+voltage offset, and 170tune keys every profile to a card serial.
+
+| GPU | serial | offset | ceiling |
+|---|---|---|---|
+| 0 | 1322421042439 | +200 | 1470 MHz |
+| 1 | 1322621048774 | +100 | 1470 MHz |
+| 2 | 1322421043344 | +200 | 1470 MHz |
+| 3 | 1322821045481 | +100 | 1470 MHz |
+| 4 | 1322321055604 | +200 | 1470 MHz |
+| 5 | 1322421000145 | +200 | 1470 MHz |
+| 6 | 1322821057768 | +200 | 1470 MHz |
+| 7 | 1322321010343 | +200 | 1470 MHz |
+
+Cards 1 and 3 hold `+200` in quarantine. `170tune persist save` will refuse
+that point on those two serials.
+
+### The synthetic gate is not enough
+
+`170tune gate` soaks a card, writes and reads back almost all of its 64 GB,
+and runs about 59,000 bit-exact matrix multiplies. Every card passed that gate
+at `+250`, and the real server still died. Card 3 threw `Xid 13 Illegal
+Instruction Encoding` seconds into the first vLLM request. Card 1 threw the
+same fault at `+200` after four clean benchmark rounds.
+
+Both faults landed on `TPC 6, SM 1`. Only the real workload found them, so
+qualify an offset with the engine that will serve, over many rounds. The
+shipped offsets above survive 23 rounds of 8 concurrent streams plus 5
+long-context needle checks, with no Xid.
+
+Card 6 sits in a well cooled slot and peaks at 54 C HBM under a full-VRAM
+sweep. It cannot reach the 60 C that a hot gate wants, so its receipt is cold.
+
+### Boot path
+
+Two units apply this at boot, in order:
+
+- `170tune-persist.service` applies each card's own offset and ceiling. It
+  reads `/var/lib/170tune/persist/<serial>.conf`.
+- `gpu-power-limit.service` runs
+  [`scripts/gpu-power-limit.sh`](scripts/gpu-power-limit.sh) at 175 W.
+
+The order matters. 170tune raises the limit to 300 W as headroom, so the cap
+unit declares `After=170tune-persist.service`.
+
+The box always boots on stock values first. To recover from a bad profile,
+run `systemctl mask 170tune-persist.service` over SSH and reboot.
+
+### Thermals and faults
+
+Under load the cards reach 52 to 70 C on the core and 58 to 73 C on the HBM.
+The limits are 85 C and 95 C.
+
+These cards have no HBM ECC and no row remapping. `nvidia-smi -q -d ECC` and
+`--query-remapped-rows` both return `[N/A]`. A bad memory cell is permanent,
+silent, and looks like a software problem. Run `dmesg | grep -c Xid` before
+every launch.

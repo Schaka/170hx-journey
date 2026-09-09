@@ -2,8 +2,9 @@
 
 Every backend starts through
 [compose/docker-compose.yml](compose/docker-compose.yml). The compose file defines
-ten profiles: `dsv4`, `dsv4backport`, `qwen`, `qwen8gpu`, `qwenawq`, `glm53flash`,
-`glm53flash8gpu`, `glm53int4`, `glm53int48gpu`, and `glm53mix8gpu`. All ten are
+ten profiles: `dsv4`, `dsv4backport`, `qwen`, `qwen8gpu`, `qwenawq`,
+`glm53flash`, `glm53flash6gpu`, `glm53int4`, `glm53int48gpu`, and
+`glm53mix8gpu`. All ten are
 mutually exclusive on this host, because they all bind port 8098.
 
 ## Model files
@@ -181,7 +182,7 @@ quantization has two, on 4 and 8 GPUs.
 
 ### A patch for MTP speculative decoding under pipeline parallel
 
-`glm53flash6gpu` and `glm53flash8gpu` below both use
+`glm53flash` and `glm53flash6gpu` below both use
 pipeline parallel, and both mount a patch file over the vllm-backport image:
 [`patches/vllm-backport/mtp-embed-from-checkpoint.py`](patches/vllm-backport/mtp-embed-from-checkpoint.py),
 at
@@ -199,53 +200,46 @@ The patch is [wtdcode/vllm-backport pull request
 the time of writing. It reads the target model's embedding tensor from the checkpoint file. It
 copies the tensor into the drafter's own embedding, so the drafter has real
 values to work from. This repository adds one part the upstream patch does
-not cover: `--tensor-parallel-size` above 1 shards the embedding table
-across GPUs, and the upstream patch copies the full, unsharded tensor. It
+not cover. `--tensor-parallel-size` above 1 shards the embedding table across
+GPUs, and the upstream patch copies the full tensor. It
 fails with a size mismatch on `glm53flash6gpu`, which uses tensor parallel
 and pipeline parallel together. The added code reads the shard boundaries
 from vLLM's own embedding layer (`shard_indices`) and slices the checkpoint
 tensor to match.
 
-### glm53flash: tensor-parallel on 4 GPUs
+### glm53flash: pipeline-parallel on 4 GPUs
 
 `glm53flash` runs
 [wtdcode/GLM-5.3-Flash-AWQ-W4A16](https://huggingface.co/wtdcode/GLM-5.3-Flash-AWQ-W4A16)
-with `--tensor-parallel-size 4`, matching wtdcode's own recipe, tested working
-on this hardware. Start it with
-[`run-glm53-flash-podman.sh`](scripts/run-glm53-flash-podman.sh). This
-profile uses no pipeline parallel, so the target's embedding already sits on
-every rank and the patch above does not apply to it.
+with `--pipeline-parallel-size 4`. Start it with
+[`run-glm53-flash-podman.sh`](scripts/run-glm53-flash-podman.sh).
 
-An earlier version of this profile used `--pipeline-parallel-size 4` instead,
-for the same PCIe Gen2 reason as the DeepSeek-V4 profiles. That did not work:
-GLM-5.3's roughly 176 GB of weights do not split evenly across pipeline
-stages. One stage overflowed a 64 GB card during warmup, before the engine
-even started sizing the KV cache. Tensor parallel splits every layer's
-weights evenly by construction, so it does not have this problem. It also
-matches the recipe wtdcode already tested for this model.
+The 45 layers do not split evenly. The AWQ quantization leaves layer 45, the
+MTP drafter, dense BF16. That layer lands on the last stage next to the LM
+head. An even split overflows the last card by about 4 GiB before the engine
+sizes the KV cache.
 
-Tensor parallel fixed the overflow, but this profile then failed to fit a
-full 1,000,000-token context. `vllm`'s own log measured the KV cache math
-directly at each step:
+`VLLM_PP_LAYER_PARTITION=14,12,12,7` fixes that. It also balances the 11
+`deepseek_sparse_attention` layers across the stages, as 3, 3, 3 and 2. Those
+layers sit at indices 3, 7 and every fourth index up to 43. Do not rebalance
+by layer count.
+The layers differ in cost.
 
-| change | available KV cache | estimated max context |
-|---|---|---|
-| baseline (TP4, `--gpu-memory-utilization 0.85`, `--max-num-batched-tokens 8192`) | 1.08 GiB | 71,424 |
-| `--max-num-batched-tokens` down to 2048 | 1.88 GiB | 140,544 |
-| add `--language-model-only` (drops the unused vision/video encoder cache) | 2.46 GiB | 188,928 |
-| `--gpu-memory-utilization` up to 0.90 | 5.63 GiB | 457,344 |
+This profile mounts the MTP embedding patch described above, because the
+drafter runs on the last stage under pipeline parallel.
 
-A single 1,000,000-token request needs 12.04 GiB of KV cache on this model,
-so none of these changes reach it on 4 GPUs. `--max-model-len 500000`
-(`GLM_MAXLEN`) does fit, and this is the value the profile uses today.
-`--max-num-batched-tokens` and `cudagraph_capture_sizes` were only tested at
-the low end (2048 and `[1,2,4,8]`). Higher values, closer to wtdcode's
-original recipe, can fit within the memory this configuration freed up.
-Nobody tested that combination yet.
+Measured numbers at `--max-model-len 262144`:
 
-Measured single-stream decode on this profile reaches about 47 tokens per
-second. When 500,000 tokens of context is enough and a 4-GPU footprint is
-not a problem, use `glm53flash` over the profiles below.
+| measure | value |
+|---|---|
+| KV cache pool | 1,670,327 tokens, 6.37x at full length |
+| single-stream decode, warm | 71 tokens per second |
+| 4 concurrent streams | 52 tokens per second total |
+| 8 concurrent streams | 91 tokens per second total |
+
+If 262,144 tokens of context is enough and 4 free GPUs matter, use
+`glm53flash`. For a longer context, use `glm53flash6gpu` below. That profile
+is both faster and reaches 1,048,576 tokens.
 
 ### glm53flash6gpu: tensor and pipeline parallel on 6 GPUs, the fastest profile
 
@@ -256,46 +250,39 @@ stages of 2 GPUs each. Start it with
 
 This layout keeps every all-reduce inside one pair of GPUs. vLLM's custom
 all-reduce kernel only works within a pair. It refuses to run across more
-than 2 PCIe-only GPUs, so `glm53flash` (TP4) and `glm53flash8gpu` (PP8) both
-fall back to NCCL's plain all-reduce instead.
+than 2 PCIe-only GPUs, so a wider tensor-parallel group falls back to NCCL's
+plain all-reduce instead.
 
 The 3 pipeline stages split unevenly by default. The model spreads 45 hidden
 layers across the stages, and the last stage also carries the MTP head and
 the LM head. Those two add fixed memory on top of its share of the layers.
 Setting `VLLM_PP_LAYER_PARTITION=16,15,14` puts fewer layers on the last
 stage, which balances memory across all 3 stages. Without it, this profile
-fails with an out-of-memory error before it starts sizing the KV cache, the
-same problem `glm53flash` hit at `--pipeline-parallel-size 4`.
+fails with an out-of-memory error before it starts sizing the KV cache.
 
-This profile mounts the patch described above and runs with MTP on. Draft
-acceptance measures 54 to 78%, with a mean acceptance length of 2.6 to 3.3.
-Single-stream decode measures about 54 tokens per second, the fastest of
-every GLM-5.3 profile in this file, on 2 fewer GPUs than `glm53flash8gpu`
-below. This profile only needs 6 of the 8 cards, leaving 2 free for other services.
-When that matters more than the extra setup, use this profile over
-`glm53flash`.
+This profile mounts the patch described above and runs with MTP on, at
+`num_speculative_tokens` 2. Two is the value to use for prose. Code and
+structured output can gain from 3. Five collapses draft acceptance and costs
+speed on every workload.
 
-### glm53flash8gpu: pipeline-parallel on 8 GPUs
+This is the fastest profile in this file, and it reaches the model's full
+context. Measured numbers at `--max-model-len 1048576`:
 
-`glm53flash8gpu` runs the same model with `--pipeline-parallel-size 8`
-instead, spreading the same weights across all 8 GPUs. Tested working on this
-hardware: peak memory per card drops to about 52 GB out of 64 GB. That leaves enough room for `--max-model-len 1000000` (`GLM_MAXLEN`). That
-value stays close to the model's native ceiling of `1048576`, and it matches
-the limit set on every other model in this file. This profile also mounts
-the MTP patch. Draft acceptance measures 54 to 78%, and single-stream decode
-measures about 51 tokens per second. Start it with
-[`run-glm53-flash-8gpu-podman.sh`](scripts/run-glm53-flash-8gpu-podman.sh).
+| measure | value |
+|---|---|
+| KV cache pool | 3,034,356 tokens, 2.89x at full length |
+| single-stream decode, warm | 82 tokens per second |
+| 4 concurrent streams | 54 tokens per second total |
+| 8 concurrent streams | 91 tokens per second total |
+| prefill at 209,786 tokens | 2,989 tokens per second |
+| prefill at 917,169 tokens | 2,597 tokens per second |
 
-Single-stream decode measures 13 to 16 tokens per second on this profile,
-well below `glm53flash`. Every token crosses 7 inter-GPU handoffs, over a
-Gen2 x4 link with no P2P, instead of the 3 handoffs that
-`--pipeline-parallel-size 4` needs. `glm53flash8gpu` pays a larger version of
-the same hop cost documented for `qwen8gpu` below. The MTP speculative
-decoding in this profile barely helps. Mean acceptance length measures
-around 1.12, with a 4 to 5% draft acceptance rate. Most draft tokens go to
-waste, and each one still pays for a full round trip through all 8 stages.
-`glm53flash` above wins on speed at every context length it can reach. When a
-request needs more than 500,000 tokens of context, use this profile instead.
+A needle test at 917,169 tokens returns the exact answer, so the full context
+works and does not only fit.
+
+This layout beats `glm53flash` on speed because a token crosses 2 pipeline
+hops instead of 3, and every all-reduce stays inside one GPU pair. If 6 cards
+are free, use this profile.
 
 ### glm53int4 and glm53int48gpu: the full GLM-5.3 model, not Flash
 
@@ -610,7 +597,7 @@ wrapper around one `podman compose --profile <name> up -d` call.
 [`stop-all-podman.sh`](scripts/stop-all-podman.sh) holds the list of every
 profile and a `stop_all` function that brings all of them down. Every other
 script sources it and calls `stop_all` before it starts its own profile,
-because all nine profiles share port 8098.
+because all ten profiles share port 8098.
 
 - `run-pp-dspark-podman.sh` starts the DeepSeek-V4-Flash `dsv4` service, the fork
   build. It also checks GPU health before the start. If it finds a wedged GPU
@@ -626,7 +613,6 @@ because all nine profiles share port 8098.
   profile (AWQ W4A16 quantization).
 - `run-glm53-flash-podman.sh` starts the `glm53flash` profile
   (GLM-5.3-Flash-AWQ-W4A16, 4 GPUs). Does not start on this hardware today.
-- `run-glm53-flash-8gpu-podman.sh` starts the `glm53flash8gpu` profile
   (GLM-5.3-Flash-AWQ-W4A16, all 8 GPUs).
 - `run-glm53-int4-podman.sh` starts the `glm53int4` profile
   (GLM-5.3-AWQ-INT4, 4 GPUs). Does not start on this hardware today.

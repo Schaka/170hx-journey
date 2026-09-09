@@ -252,58 +252,7 @@ services:
     environment:
       NCCL_ALGO: "Ring"
       NCCL_PROTO: "Simple"
-    volumes:
-      - ${GLM_FLASH_MODEL:-/models/GLM-5.3-Flash-AWQ-W4A16}:/model
-      - ${HOME}/cache/glm53flash/vllm:/root/.cache/vllm
-      - ${HOME}/cache/glm53flash/flashinfer:/root/.cache/flashinfer
-      - ${HOME}/cache/glm53flash/triton:/root/.triton
-      - ${HOME}/cache/glm53flash/nv:/root/.nv
-      - ${HOME}/cache/glm53flash/humming:/root/.humming
-      - ${HOME}/cache/glm53flash/cupy:/root/.cupy
-      - ${HOME}/cache/glm53flash/tilelang:/root/.tilelang
-    command:
-      - /model
-      - --host
-      - 0.0.0.0
-      - --port
-      - "8000"
-      - --served-model-name
-      - glm-5.3-flash
-      - --tensor-parallel-size
-      - "4"
-      - --language-model-only
-      - --max-model-len
-      - "${GLM_MAXLEN:-500000}"
-      - --gpu-memory-utilization
-      - "0.90"
-      - --max-num-seqs
-      - "8"
-      - --max-num-batched-tokens
-      - "2048"
-      - --enable-prefix-caching
-      - --enable-prompt-tokens-details
-      - --compilation-config
-      - '{"cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[1,2,4,8],"max_cudagraph_capture_size":8}'
-      - --speculative-config
-      - '{"method":"mtp","num_speculative_tokens":3}'
-      - --enable-auto-tool-choice
-      - --tool-call-parser
-      - glm47
-      - --reasoning-parser
-      - glm45
-
-  glm53flash8gpu:
-    image: ${GLM_IMAGE:-docker.io/lazymio/vllm-backport:latest-sm80}
-    container_name: glm-5.3-flash-8gpu
-    profiles: ["glm53flash8gpu"]
-    devices:
-      - nvidia.com/gpu=all
-    shm_size: "16g"
-    ports:
-      - "8098:8000"
-    environment:
-      NCCL_ALGO: "Ring"
-      NCCL_PROTO: "Simple"
+      VLLM_PP_LAYER_PARTITION: "14,12,12,7"
     volumes:
       - ${GLM_FLASH_MODEL:-/models/GLM-5.3-Flash-AWQ-W4A16}:/model
       - ${HOME}/patches/vllm-backport/mtp-embed-from-checkpoint.py:/usr/local/lib/python3.12/dist-packages/vllm/v1/worker/gpu/spec_decode/eagle/utils.py:ro
@@ -323,22 +272,24 @@ services:
       - --served-model-name
       - glm-5.3-flash
       - --pipeline-parallel-size
-      - "8"
+      - "4"
+      - --language-model-only
       - --max-model-len
-      - "${GLM_MAXLEN:-1000000}"
+      - "${GLM_MAXLEN:-262144}"
       - --gpu-memory-utilization
-      - "0.85"
+      - "0.92"
       - --max-num-seqs
-      - "16"
+      - "8"
       - --max-num-batched-tokens
-      - "8192"
+      - "4096"
+      - --kv-cache-dtype
+      - auto
       - --enable-prefix-caching
       - --enable-prompt-tokens-details
-      - --disable-custom-all-reduce
       - --compilation-config
-      - '{"cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[1,2,4,8,16],"max_cudagraph_capture_size":16}'
+      - '{"cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[1,2,4,8],"max_cudagraph_capture_size":8}'
       - --speculative-config
-      - '{"method":"mtp","num_speculative_tokens":3}'
+      - '{"method":"mtp","num_speculative_tokens":2}'
       - --enable-auto-tool-choice
       - --tool-call-parser
       - glm47
@@ -387,19 +338,21 @@ services:
       - "3"
       - --language-model-only
       - --max-model-len
-      - "${GLM_MAXLEN:-500000}"
+      - "${GLM_MAXLEN:-1048576}"
       - --gpu-memory-utilization
-      - "0.88"
+      - "0.92"
       - --max-num-seqs
       - "8"
       - --max-num-batched-tokens
-      - "2048"
+      - "4096"
+      - --kv-cache-dtype
+      - auto
       - --enable-prefix-caching
       - --enable-prompt-tokens-details
       - --compilation-config
       - '{"cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[1,2,4,8],"max_cudagraph_capture_size":8}'
       - --speculative-config
-      - '{"method":"mtp","num_speculative_tokens":3}'
+      - '{"method":"mtp","num_speculative_tokens":2}'
       - --enable-auto-tool-choice
       - --tool-call-parser
       - glm47

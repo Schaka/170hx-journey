@@ -8,7 +8,7 @@
 # Usage: sudo ./gpu-power-limit.sh [watts]      (default 200, hardware max 300)
 set -euo pipefail
 
-WATTS=${1:-200}
+WATTS=${1:-175}
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "Run this with sudo: nvidia-smi -pl needs root." >&2

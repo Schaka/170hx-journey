@@ -3,7 +3,7 @@
 # bind port 8098, so a launcher script sources this and calls stop_all before
 # it starts its own profile.
 
-STOP_ALL_PROFILES=(dsv4 dsv4backport qwen qwen8gpu qwenawq glm53flash glm53flash6gpu glm53flash8gpu glm53int4 glm53int48gpu)
+STOP_ALL_PROFILES=(dsv4 dsv4backport qwen qwen8gpu qwenawq glm53flash glm53flash6gpu glm53int4 glm53int48gpu)
 
 stop_all() {
   local compose_dir
