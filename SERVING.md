@@ -538,11 +538,14 @@ Discard the first sweep after a restart. It reads 20 to 25% low while Triton
 autotunes and the graphs warm up. The 8-stream figure settles at 101 to 103
 over the next runs, and single-stream at 24.7.
 
+Decode slows with context depth, but not sharply. Single-stream decode runs
+at 24.7 tokens per second on a short prompt and 13.3 at 844,617 tokens.
+
 Prefill runs at 1,330 to 2,370 tokens per second, faster on longer prompts.
-A 204,819-token prompt takes 86 seconds and a cold 923,121-token prompt
-takes 695 seconds. Treat the full million as a load-once batch mode, not an
+A 204,819-token prompt takes 86 seconds. A cold 844,617-token prompt takes
+601 seconds. Treat the full million as a load-once batch mode, not an
 interactive one. The prefix cache makes every later turn on the same context
-cheap.
+cheap. The same 844,617-token context replays in 10 seconds.
 
 #### MTP speculative decoding does not work here yet
 
