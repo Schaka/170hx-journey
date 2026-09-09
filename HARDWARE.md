@@ -48,3 +48,29 @@ nvidia-smi -q | grep -A1 "HW Power Brake Slowdown"
 If the output reads `Active` on a card that is not thermally limited or power limited,
 the platform asserts `PWRBRK#`. To fix this, place Kapton tape over pin B30 on the
 card edge connector. You can also use a riser that does not route B30.
+
+## Power limit
+
+Each card ships with a 250 W limit and a 300 W hardware maximum. Under load a
+card draws short peaks above 250 W. A limit of **200 W** on every card bounds
+that draw. It bounds the heat and the load on the two power supplies and
+their cables with it.
+
+200 W costs no measured throughput. The cards hold 1470 to 1485 MHz under
+load at 200 W, against 1490 MHz uncapped. Single-stream decode and prefill
+are identical at 175 W, 200 W, and 250 W. The concurrent-decode benchmark
+swings too widely to separate the three, so 200 W is the conservative pick.
+
+[`scripts/gpu-power-limit.sh`](scripts/gpu-power-limit.sh) sets the limit on
+every card. `gpu-power-limit.service` runs it at boot and is enabled on this
+host. The limit lives in NVML, not the VBIOS, so a card that boots without
+the service runs at its stock 250 W.
+
+Deeper tuning needs
+[cachenetics/170tune](https://github.com/cachenetics/170tune), which
+undervolts and tunes the HBM clock through live BAR0 register writes. Two
+things block it on this host today. The kernel command line has no
+`iomem=relaxed`, so userspace cannot map BAR0. There is also no `nvcc`, so
+the tool cannot build the bit-exact compute check that its qualification
+gate needs. The failure mode of a bad undervolt on this card is wrong bytes,
+not a crash, so do not run one without that gate.

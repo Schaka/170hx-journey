@@ -526,17 +526,19 @@ Aggregate completion throughput, 256-token outputs, diverse short prompts:
 
 | concurrent requests | aggregate tok/s | per stream |
 |---|---|---|
-| 1 | 24.6 | 24.6 |
+| 1 | 24.7 | 24.7 |
 | 4 | 73.0 | 18.3 |
-| 8 | 103.6 | 13.0 |
+| 8 | 75 to 77 | 9.4 to 9.6 |
 
-The CUDA graph capture sizes run up to 48 rather than the default 8. That
-alone lifts the 8-stream number from 73.7 to 103.6, because a decode batch
-wider than 8 otherwise falls back to eager.
+Measure concurrency with long generations. A 256-token run at 8 streams
+returns anywhere from 54 to 105 tokens per second on an unchanged server.
+The first part of a generation runs faster than the steady state. A
+1024-token run settles at 75 to 77 and repeats. Single-stream and prefill
+are stable at any run length.
 
-Discard the first sweep after a restart. It reads 20 to 25% low while Triton
-autotunes and the graphs warm up. The 8-stream figure settles at 101 to 103
-over the next runs, and single-stream at 24.7.
+The CUDA graph capture sizes run up to 48 rather than the default 8. A
+decode batch wider than 8 then keeps its graph instead of falling back to
+eager.
 
 Decode slows with context depth, but not sharply. Single-stream decode runs
 at 24.7 tokens per second on a short prompt and 13.3 at 844,617 tokens.
