@@ -180,8 +180,8 @@ quantization has two, on 4 and 8 GPUs.
 
 ### A patch for MTP speculative decoding under pipeline parallel
 
-`glm53flash6gpu`, `glm53flash8gpu`, and `glm53int48gpu` below all use
-pipeline parallel, and all mount a patch file over the vllm-backport image:
+`glm53flash6gpu` and `glm53flash8gpu` below both use
+pipeline parallel, and both mount a patch file over the vllm-backport image:
 [`patches/vllm-backport/mtp-embed-from-checkpoint.py`](patches/vllm-backport/mtp-embed-from-checkpoint.py),
 at
 `/usr/local/lib/python3.12/dist-packages/vllm/v1/worker/gpu/spec_decode/eagle/utils.py`.
@@ -308,40 +308,82 @@ the vllm-backport project. The checkpoint is 455 GB on disk.
 is 455 GB, so this profile cannot load the model at all, on any parallelism
 setting.
 
-`glm53int48gpu` requests all 8 GPUs, 512 GB total, and works, using
-`--tensor-parallel-size 2` on top of `--pipeline-parallel-size 4` (4 stages
-of 2 GPUs each), plus `--enable-expert-parallel`. Expert parallel splits
-this checkpoint's MoE experts across the 2 GPUs in each stage, halving the
-per-GPU expert weight. Without it, each of the 2 GPUs in a stage holds close to the whole stage's
-experts. The model does not fit even on 2 GPUs per stage that way. `VLLM_PP_LAYER_PARTITION=21,21,21,15` gives the last stage
-fewer layers, since it also carries a separate, non-tied `lm_head` and the
-grafted MTP layer. `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`
-avoids an allocator fragmentation failure during Marlin weight repacking.
+`glm53int48gpu` requests all 8 GPUs, 512 GB total, and serves 262,144 tokens
+of context. It uses `--tensor-parallel-size 2` on top of
+`--pipeline-parallel-size 4`, so 4 stages of 2 GPUs each. It also uses
+`--enable-expert-parallel`. Expert parallel splits this checkpoint's MoE
+experts across the 2 GPUs in each stage. That halves the per-GPU expert
+weight. Without it, each GPU in a stage holds close to the whole stage's
+experts, and the model does not fit.
+
 Start it with
 [`run-glm53-int4-8gpu-podman.sh`](scripts/run-glm53-int4-8gpu-podman.sh).
 
-This profile also needs three patch files, all under
-[`patches/vllm-backport/`](patches/vllm-backport/), mounted read-only over
-the vllm-backport image:
+#### Why the layout is 4 stages of 2 GPUs, and not 8 stages of 1
 
-| patch | fixes |
-|---|---|
-| `mtp-embed-from-checkpoint.py` | the same MTP-under-pipeline-parallel fix described above |
-| `deepseek_v32-fused-q-sm80-fp8.py` | this model's own query-preprocessing kernel casts to a Triton fp8 type unsupported below SM89. Rewrites the cast to a software encoder that produces the same byte. Also changes one buffer's dtype, so Triton never has to declare the unsupported type at all |
-| `mla-attention-sparse-mha-no-prefill.py` | a one-line fix. This model's attention backend has no dense-MHA prefill path, so it never sets a `prefill` field. A shared vLLM code path expects that field on every metadata type |
+Pure pipeline parallel is the better layout on this hardware. The GPUs sit
+on PCIe gen2 x4, so a tensor-parallel all-reduce on every layer costs more
+than one activation tensor per stage boundary. It does not work with this
+checkpoint. The last pipeline stage carries about 13 GB of weight beyond its
+own layers. On 8 stages that stage runs out of memory during the profile
+run, with under 200 MB free. Tensor parallel plus expert parallel is what
+makes the last stage fit, because both split that extra weight across the
+2 GPUs of the stage.
+
+#### Memory balance across the stages
+
+vLLM allocates the same number of KV cache blocks on every rank. The context
+limit is therefore the worst rank, at `free bytes / bytes per token`. Bytes
+per token scale with the layer count on that rank. The target is therefore
+free memory in proportion to layer count, not equal free memory.
+`VLLM_PP_LAYER_PARTITION=20,20,20,18` gives the last stage 2 fewer layers,
+because it also carries a separate, non-tied `lm_head`.
+`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` avoids an allocator
+fragmentation failure during Marlin weight repacking.
 
 `--gpu-memory-utilization` does not limit weight loading itself. It only
 sets a budget for the KV cache, sized after weight loading finishes.
 Raising it from 0.85 towards 0.97 made no difference to whether the model
 loads. It only changed how much KV cache was left over afterward.
 
-The real limit on this hardware is memory, not software. Weight loading
-alone uses 57 to 59 GB per GPU, out of 64. `--max-model-len` above roughly
-70,000 fails to find enough KV cache memory, even at
-`--gpu-memory-utilization 0.97`. `GLM_MAXLEN` defaults to `65536`, tested
-working with correct output. The model's native context limit is
-1,048,576, far beyond what this checkpoint's memory footprint leaves room
-for on this hardware.
+#### The fp8 KV cache
+
+This profile stores its KV cache in DeepSeek's packed `fp8_ds_mla` layout,
+through `--kv-cache-dtype fp8_ds_mla` and `--attention-backend
+TRITON_MLA_SPARSE`. The layout packs one token into 656 bytes: 512 e4m3
+values, 4 group scales, and 64 unquantized RoPE values. The bf16 layout
+needs 1152 bytes per token per layer, so the fp8 layout holds 1.76 times as
+many tokens in the same memory.
+
+Ampere has no fp8 hardware, and Triton refuses to name the `fp8e4nv` type
+below SM89. The kernel therefore never names an fp8 type. It loads the cache
+as `uint8` and rebuilds each value with integer shifts.
+
+The KV pool holds 291,008 tokens at `--max-model-len 262144`. A
+needle-in-haystack probe at 221,576 tokens returns the exact answer.
+
+#### Speculative decoding is off
+
+MTP speculative decoding costs about 6 GB on the last pipeline stage. That
+stage is the one that binds the context limit, so the memory buys context
+instead. Set `SPEC` in the launcher, or add `--speculative-config` back, to
+trade context for decode speed. Batch-1 decode runs at about 21 tokens per
+second without it. Prefill runs at about 1,340 tokens per second at 220,000
+tokens of context.
+
+#### The patch files
+
+This profile needs five patch files, all under
+[`patches/vllm-backport/`](patches/vllm-backport/), mounted read-only over
+the vllm-backport image:
+
+| patch | fixes |
+|---|---|
+| `deepseek_v32-fused-q-sm80-fp8.py` | this model's query-preprocessing kernel casts to a Triton fp8 type unsupported below SM89. Rewrites the cast to a software encoder that produces the same byte. Also keeps every cache buffer typed `uint8`, so Triton never has to declare the unsupported type |
+| `mla-attention-sparse-mha-no-prefill.py` | three fixes. This model's attention backend has no dense-MHA prefill path, so it never sets a `prefill` field that a shared vLLM code path expects. The same backend never reaches the dense-MHA prefill code, so the patch also drops a 3.5 GB profile-run reserve for it. It also maps `--kv-cache-dtype fp8` onto `fp8_ds_mla` for this backend |
+| `mla-fp8-sm80-kernel.py` | the sparse MLA attention kernel that reads the packed 656-byte fp8 cache without naming an fp8 Triton type. Vendored from [bayley/vllm-170hx-glm5](https://github.com/bayley/vllm-170hx-glm5) |
+| `triton-mla-sparse-fp8.py` | declares `fp8_ds_mla` supported on the `TRITON_MLA_SPARSE` backend and routes decode to the kernel above |
+| `indexer-prefill-buffer-cap.py` | the sparse indexer sizes its prefill gather workspace at 40 tokens per model token. That is a heuristic ceiling, not a requirement. The cap returns about 850 MB per GPU to the KV cache |
 
 ## Persisted JIT and compile caches
 

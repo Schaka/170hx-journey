@@ -470,13 +470,16 @@ services:
     environment:
       NCCL_ALGO: "Ring"
       NCCL_PROTO: "Simple"
-      VLLM_PP_LAYER_PARTITION: "${GLM_INT4_PARTITION:-21,21,21,15}"
+      VLLM_PP_LAYER_PARTITION: "${GLM_INT4_PARTITION:-20,20,20,18}"
       PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
+      GLM53_IDX_PREFILL_BUF_TOKENS: "${GLM_INT4_IDX_BUF:-4000000}"
     volumes:
       - ${GLM_INT4_MODEL:-/models/GLM-5.3-AWQ-INT4}:/model
-      - ${HOME}/patches/vllm-backport/mtp-embed-from-checkpoint.py:/usr/local/lib/python3.12/dist-packages/vllm/v1/worker/gpu/spec_decode/eagle/utils.py:ro
       - ${HOME}/patches/vllm-backport/deepseek_v32-fused-q-sm80-fp8.py:/usr/local/lib/python3.12/dist-packages/vllm/models/deepseek_v32/common/kernels.py:ro
       - ${HOME}/patches/vllm-backport/mla-attention-sparse-mha-no-prefill.py:/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/attention/mla_attention.py:ro
+      - ${HOME}/patches/vllm-backport/mla-fp8-sm80-kernel.py:/usr/local/lib/python3.12/dist-packages/vllm/_glm53_mla_fp8.py:ro
+      - ${HOME}/patches/vllm-backport/triton-mla-sparse-fp8.py:/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/backends/mla/triton_mla_sparse.py:ro
+      - ${HOME}/patches/vllm-backport/indexer-prefill-buffer-cap.py:/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/backends/mla/indexer.py:ro
       - ${HOME}/cache/glm53int4/vllm:/root/.cache/vllm
       - ${HOME}/cache/glm53int4/flashinfer:/root/.cache/flashinfer
       - ${HOME}/cache/glm53int4/triton:/root/.triton
@@ -496,22 +499,26 @@ services:
       - "2"
       - --pipeline-parallel-size
       - "4"
+      - --attention-backend
+      - TRITON_MLA_SPARSE
+      - --kv-cache-dtype
+      - fp8_ds_mla
+      - --block-size
+      - "64"
+      - --dtype
+      - bfloat16
       - --max-model-len
-      - "${GLM_MAXLEN:-65536}"
+      - "${GLM_MAXLEN:-262144}"
       - --gpu-memory-utilization
       - "${GLM_INT4_UTIL:-0.97}"
       - --max-num-seqs
-      - "16"
-      - --max-num-batched-tokens
-      - "${GLM_INT4_BATCHED_TOKENS:-2048}"
+      - "8"
       - --enable-expert-parallel
       - --enable-prefix-caching
       - --enable-prompt-tokens-details
       - --disable-custom-all-reduce
       - --compilation-config
-      - '{"cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[1,2,4,8,16],"max_cudagraph_capture_size":16}'
-      - --speculative-config
-      - '{"method":"mtp","num_speculative_tokens":3}'
+      - '{"cudagraph_capture_sizes":[1,2,4,8],"max_cudagraph_capture_size":8}'
       - --enable-auto-tool-choice
       - --tool-call-parser
       - glm47
