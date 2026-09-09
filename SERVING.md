@@ -324,11 +324,19 @@ Start it with
 Pure pipeline parallel is the better layout on this hardware. The GPUs sit
 on PCIe gen2 x4, so a tensor-parallel all-reduce on every layer costs more
 than one activation tensor per stage boundary. It does not work with this
-checkpoint. The last pipeline stage carries about 13 GB of weight beyond its
-own layers. On 8 stages that stage runs out of memory during the profile
-run, with under 200 MB free. Tensor parallel plus expert parallel is what
-makes the last stage fit, because both split that extra weight across the
-2 GPUs of the stage.
+checkpoint.
+
+This checkpoint's layers are not the same size. Layers 0 to 2 are dense and
+take 0.75 GB each. Layers 4 to 76 take 5.4 GB each. **Layers 3 and 77 take
+18.4 GB each**, because the quantization leaves them at higher precision.
+Layer 78 is the grafted MTP block, at 18.5 GB.
+
+Layer 77 sits on the last pipeline stage, and no partition can move it. On 8
+stages that stage holds 59.3 GB of weight and then runs out of memory while
+Marlin repacks layer 77, with 200 MB free. Tensor parallel plus expert
+parallel is what makes it fit. Both split that layer's experts across the
+2 GPUs of the stage, which halves the resident size and the repack
+scratch.
 
 #### Memory balance across the stages
 
@@ -337,7 +345,8 @@ limit is therefore the worst rank, at `free bytes / bytes per token`. Bytes
 per token scale with the layer count on that rank. The target is therefore
 free memory in proportion to layer count, not equal free memory.
 `VLLM_PP_LAYER_PARTITION=20,20,20,18` gives the last stage 2 fewer layers,
-because it also carries a separate, non-tied `lm_head`.
+because it also holds the 18.4 GB layer 77 and a separate, non-tied
+`lm_head`.
 `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` avoids an allocator
 fragmentation failure during Marlin weight repacking.
 
