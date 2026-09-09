@@ -2,9 +2,9 @@
 
 Every backend starts through
 [compose/docker-compose.yml](compose/docker-compose.yml). The compose file defines
-nine profiles: `dsv4`, `dsv4backport`, `qwen`, `qwen8gpu`, `qwenawq`, `glm53flash`,
-`glm53flash8gpu`, `glm53int4`, and `glm53int48gpu`. All nine are mutually exclusive
-on this host, because they all bind port 8098.
+ten profiles: `dsv4`, `dsv4backport`, `qwen`, `qwen8gpu`, `qwenawq`, `glm53flash`,
+`glm53flash8gpu`, `glm53int4`, `glm53int48gpu`, and `glm53mix8gpu`. All ten are
+mutually exclusive on this host, because they all bind port 8098.
 
 ## Model files
 
@@ -17,10 +17,11 @@ Model weights live on the `/models` mount (`/dev/md0`), one directory per model:
 | Qwen3.8-Flash-Next-AWQ-W4A16 | `/models/Qwen3.8-Flash-Next-AWQ-W4A16` |
 | GLM-5.3-Flash-AWQ-W4A16 | `/models/GLM-5.3-Flash-AWQ-W4A16` |
 | GLM-5.3 (full model, INT4 quant) | `/models/GLM-5.3-AWQ-INT4` |
+| GLM-5.3 (full model, INT4/INT8 mixed quant) | `/models/GLM-5.3-Int4-Int8Mix` |
 
 The compose file mounts these paths by default. Set `DSV4_MODEL`, `QWEN_MODEL`,
-`QWEN_AWQ_MODEL`, `GLM_FLASH_MODEL`, or `GLM_INT4_MODEL` to override the path
-for a single run.
+`QWEN_AWQ_MODEL`, `GLM_FLASH_MODEL`, `GLM_INT4_MODEL`, or `GLM_MIX_MODEL` to
+override the path for a single run.
 
 The `qwen`, `qwen8gpu`, and `qwenawq` services need a
 `chat_template_lenient_system.jinja` file next to their model weights. This
@@ -451,6 +452,75 @@ the vllm-backport image:
 | `mla-fp8-sm80-kernel.py` | the sparse MLA attention kernel that reads the packed 656-byte fp8 cache without naming an fp8 Triton type. Vendored from [bayley/vllm-170hx-glm5](https://github.com/bayley/vllm-170hx-glm5) |
 | `triton-mla-sparse-fp8.py` | declares `fp8_ds_mla` supported on the `TRITON_MLA_SPARSE` backend and routes decode to the kernel above |
 | `indexer-prefill-buffer-cap.py` | the sparse indexer sizes its prefill gather workspace at 40 tokens per model token. That is a heuristic ceiling, not a requirement. The cap returns about 850 MB per GPU to the KV cache |
+
+### glm53mix8gpu: the full GLM-5.3 at 1,048,576 tokens of context
+
+`glm53mix8gpu` runs the same full GLM-5.3 as `glm53int48gpu`, from a
+different quantization:
+[Tech2wild/GLM-5.3-Int4-Int8Mix](https://huggingface.co/Tech2wild/GLM-5.3-Int4-Int8Mix).
+The checkpoint is 377 GB on disk. It serves the model's **full 1,048,576-token
+context** on all 8 GPUs, with a KV pool of 1,307,392 tokens, or 1.25 requests
+at the full length.
+
+#### Why this checkpoint and not the cyankiwi one
+
+The two checkpoints hold the same model. They differ in which layers the
+quantizer left alone, and that decides the whole layout.
+
+| | cyankiwi/GLM-5.3-AWQ-INT4 | Tech2wild/GLM-5.3-Int4-Int8Mix |
+|---|---|---|
+| size on disk | 455 GB | 377 GB |
+| a normal MoE layer | 5.4 GB | 4.8 GB |
+| layer 3 | 18.4 GB, left in bf16 | 4.8 GB |
+| layer 77 | 18.4 GB, left in bf16 | 4.8 GB |
+| layer 78, the MTP block | 18.5 GB, left in bf16 | 9.4 GB, INT8 |
+
+Layer 77 is the last layer, so it always lands on the last pipeline stage.
+At 18.4 GB it leaves that stage no room to repack its own weights. The
+cyankiwi checkpoint therefore cannot run 8 pipeline stages at all. The
+Tech2wild checkpoint quantizes every layer from 1 to 77. All 8 stages then
+carry 44 to 49 GB, and each one keeps 13 GB or more free for the KV cache.
+
+#### Layout
+
+Pure pipeline parallel, 8 stages of 1 GPU, no tensor parallel and no expert
+parallel. This is the right layout on PCIe gen2 x4. A pipeline hop ships one
+activation tensor per stage boundary. Tensor parallel instead all-reduces on
+every layer.
+
+`VLLM_PP_LAYER_PARTITION=12,10,10,10,10,10,9,7` balances the stages by
+memory, not by layer count. Stage 0 takes 12 layers because layers 0 to 2 are
+dense and cost 0.4 to 0.8 GB each instead of 4.8 GB. Stage 7 takes 7 layers
+because it also holds `lm_head` and the whole MTP block.
+
+The KV cache uses the packed `fp8_ds_mla` layout, through the same patches
+and the same `TRITON_MLA_SPARSE` backend as `glm53int48gpu` above. MTP
+speculative decoding is on at 3 draft tokens, which needs the
+`mtp-embed-from-checkpoint.py` patch as well, for 6 patch files in total.
+
+#### Measured throughput
+
+Aggregate completion throughput, 256-token outputs, diverse short prompts:
+
+| concurrent requests | without MTP | with MTP, 3 draft tokens |
+|---|---|---|
+| 1 | 24.1 | 41 to 44 |
+| 4 | 70.6 | 71 to 88 |
+| 8 | 73.7 | 90.7 |
+
+MTP nearly doubles single-stream decode. Draft acceptance is 79%, 57%, and
+39% at the three draft positions, for 2.76 tokens per model step. The MTP
+range is wide because acceptance depends on the prompt.
+
+Prefill runs at about 1,330 tokens per second. A cold 923,121-token prompt
+therefore takes 695 seconds. Treat the full million as a load-once batch
+mode, not an interactive one. The prefix cache makes every later turn on the
+same context cheap.
+
+`--max-num-batched-tokens 8192` matters here. Speculative decoding otherwise
+drops the prefill chunk to 2048 tokens. The CUDA graph capture sizes run up
+to 48 for the same reason. At 3 draft tokens and 8 sequences a decode batch
+is 32 tokens wide, which the old ceiling of 8 pushed back to eager.
 
 ## Persisted JIT and compile caches
 

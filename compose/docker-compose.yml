@@ -525,6 +525,77 @@ services:
       - --reasoning-parser
       - glm45
 
+  glm53mix8gpu:
+    image: ${GLM_IMAGE:-docker.io/lazymio/vllm-backport:latest-sm80}
+    container_name: glm-5.3-mix-8gpu
+    profiles: ["glm53mix8gpu"]
+    devices:
+      - nvidia.com/gpu=all
+    shm_size: "16g"
+    ports:
+      - "8098:8000"
+    environment:
+      NCCL_ALGO: "Ring"
+      NCCL_PROTO: "Simple"
+      VLLM_PP_LAYER_PARTITION: "${GLM_MIX_PARTITION:-12,10,10,10,10,10,9,7}"
+      PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
+      GLM53_IDX_PREFILL_BUF_TOKENS: "${GLM_MIX_IDX_BUF:-4000000}"
+      OMP_NUM_THREADS: "1"
+    volumes:
+      - ${GLM_MIX_MODEL:-/models/GLM-5.3-Int4-Int8Mix}:/model
+      - ${HOME}/patches/vllm-backport/mtp-embed-from-checkpoint.py:/usr/local/lib/python3.12/dist-packages/vllm/v1/worker/gpu/spec_decode/eagle/utils.py:ro
+      - ${HOME}/patches/vllm-backport/deepseek_v32-fused-q-sm80-fp8.py:/usr/local/lib/python3.12/dist-packages/vllm/models/deepseek_v32/common/kernels.py:ro
+      - ${HOME}/patches/vllm-backport/mla-attention-sparse-mha-no-prefill.py:/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/attention/mla_attention.py:ro
+      - ${HOME}/patches/vllm-backport/mla-fp8-sm80-kernel.py:/usr/local/lib/python3.12/dist-packages/vllm/_glm53_mla_fp8.py:ro
+      - ${HOME}/patches/vllm-backport/triton-mla-sparse-fp8.py:/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/backends/mla/triton_mla_sparse.py:ro
+      - ${HOME}/patches/vllm-backport/indexer-prefill-buffer-cap.py:/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/backends/mla/indexer.py:ro
+      - ${HOME}/cache/glm53mix/vllm:/root/.cache/vllm
+      - ${HOME}/cache/glm53mix/flashinfer:/root/.cache/flashinfer
+      - ${HOME}/cache/glm53mix/triton:/root/.triton
+      - ${HOME}/cache/glm53mix/nv:/root/.nv
+      - ${HOME}/cache/glm53mix/humming:/root/.humming
+      - ${HOME}/cache/glm53mix/cupy:/root/.cupy
+      - ${HOME}/cache/glm53mix/tilelang:/root/.tilelang
+    command:
+      - /model
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --served-model-name
+      - glm-5.3
+      - --pipeline-parallel-size
+      - "8"
+      - --tensor-parallel-size
+      - "1"
+      - --attention-backend
+      - TRITON_MLA_SPARSE
+      - --kv-cache-dtype
+      - fp8_ds_mla
+      - --block-size
+      - "64"
+      - --dtype
+      - bfloat16
+      - --max-model-len
+      - "${GLM_MIX_MAXLEN:-1048576}"
+      - --gpu-memory-utilization
+      - "${GLM_MIX_UTIL:-0.97}"
+      - --max-num-seqs
+      - "8"
+      - --max-num-batched-tokens
+      - "${GLM_MIX_BATCHED_TOKENS:-8192}"
+      - --enable-prefix-caching
+      - --enable-prompt-tokens-details
+      - --compilation-config
+      - '{"cudagraph_capture_sizes":[1,2,4,8,16,24,32,48],"max_cudagraph_capture_size":48}'
+      - --speculative-config
+      - '{"method":"mtp","num_speculative_tokens":3}'
+      - --enable-auto-tool-choice
+      - --tool-call-parser
+      - glm47
+      - --reasoning-parser
+      - glm45
+
   qwen8gpu:
     image: ${QWEN_IMAGE:-docker.io/lazymio/vllm-backport:latest-sm80}
     container_name: qwen3-flash-next-8gpu
