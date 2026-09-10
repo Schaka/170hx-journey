@@ -511,6 +511,22 @@ parallel. This is the right layout on PCIe gen2 x4. A pipeline hop ships one
 activation tensor per stage boundary. Tensor parallel instead all-reduces on
 every layer.
 
+Tensor parallel loses on every axis here, even though it cuts the pipeline
+from 7 hops to 3. Under tensor parallel each rank of a pair holds the whole
+MLA KV cache for its stage, so the pool nearly halves. `glm53flash6gpu` gains
+from tensor parallel because that model is smaller. This model has 78 layers
+of hidden size 6144, so one all-reduce per layer costs more than 4 saved
+hops.
+
+| | PP8, TP1 | TP2, PP4 |
+|---|---|---|
+| KV pool | 1,411,264 to 1,426,240 tokens | 622,464 tokens |
+| longest context | 1,048,576 | about 741,632 |
+| prefill | 2,278 tok/s | 1,437 tok/s |
+| decode, 1 stream | 25.2 to 25.4 tok/s | 24.5 tok/s |
+| decode, 4 streams | 61.4 to 61.5 tok/s | 50.4 tok/s |
+| decode, 8 streams | 83.3 to 86.1 tok/s | 61.4 tok/s |
+
 `VLLM_PP_LAYER_PARTITION=12,10,10,10,10,10,9,7` balances the stages by
 memory, not by layer count. Stage 0 takes 12 layers because layers 0 to 2 are
 dense and cost 0.4 to 0.8 GB each instead of 4.8 GB. Stage 7 takes 7 layers
@@ -558,12 +574,27 @@ last column is the same server with `--speculative-config` removed.
 Measure concurrency with long generations. A 256-token run at 8 streams
 returns anywhere from 54 to 105 tokens per second on an unchanged server.
 The first part of a generation runs faster than the steady state. A
-512-token run repeats within 2 percent. Single-stream and prefill are stable
+512-token run repeats within 4 percent. Single-stream and prefill are stable
 at any run length.
 
 The CUDA graph capture sizes run up to 48 rather than the default 8. A
 decode batch wider than 8 then keeps its graph instead of falling back to
 eager.
+
+The profile does not set `--max-num-batched-tokens`. Speculative decoding
+makes vLLM pick 2048 and print this warning:
+
+```
+max_num_scheduled_tokens is set to 2048 based on the speculative decoding
+settings. This may lead to suboptimal performance. Consider increasing
+max_num_batched_tokens
+```
+
+Ignore that warning on this box. At 4096 the same server measures 2,240
+tokens per second of prefill against 2,258. Decode drops to 22.3, 50.8 and
+79.9 tokens per second at 1, 4 and 8 streams. The KV pool falls from
+1,426,240 to 1,339,584 tokens. A wider chunk lengthens every pipeline bubble
+across 8 stages on PCIe gen2 x4.
 
 Prefill runs at 1,330 to 2,370 tokens per second, faster on longer prompts. A 204,819-token prompt
 takes 86 seconds. A cold 844,617-token prompt takes 601 seconds. Treat the
