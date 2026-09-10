@@ -759,10 +759,10 @@ stream, 512-token outputs, greedy sampling:
 
 | prompt class | accepted of drafted | tok/s |
 |---|---|---|
-| repetitive text | 0.644 | 85.6 |
-| code | 0.451 | 66.6 |
-| technical prose | 0.277 | 49.3 |
-| descriptive prose | 0.261 | 48.0 |
+| repetitive text | 0.594 | 79.4 |
+| code | 0.606 | 78.5 |
+| descriptive prose | 0.316 | 52.2 |
+| technical prose | 0.291 | 49.6 |
 
 Read any single decode number against the prompt that produced it. The
 synthetic filler in the concurrency benchmark is high-entropy text, which is
