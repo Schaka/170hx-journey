@@ -28,11 +28,21 @@ The compose file mounts these paths by default. Set `DSV4_MODEL`, `QWEN_MODEL`,
 override the path for a single run.
 
 The `qwen`, `qwen8gpu`, and `qwenawq` services need a
-`chat_template_lenient_system.jinja` file next to their model weights. This
-file does not come from the model download. Right now `/models/Qwen` and
-`/models/Qwen3.8-Flash-Next-AWQ-W4A16` hold only the stock
-`chat_template.jinja`. These three services do not start until someone adds
-the lenient template back to both directories.
+`chat_template_lenient_system.jinja` file next to their model weights. That
+file does not come from the model download. This repository keeps it at
+[`templates/qwen3.8-flash-next/chat_template_lenient_system.jinja`](templates/qwen3.8-flash-next/chat_template_lenient_system.jinja).
+Copy it into `/models/Qwen` and `/models/Qwen3.8-Flash-Next-AWQ-W4A16`.
+
+The stock template refuses a system message that is not the first message:
+
+```
+System message must be at the beginning.
+```
+
+Agent clients send a system message in the middle of a conversation, so the
+stock template rejects the request. The lenient template renders that message
+as its own system block instead. Every other case produces the exact same
+prompt as the stock template.
 
 ## DeepSeek-V4-Flash-0731
 
