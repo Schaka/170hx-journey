@@ -20,12 +20,13 @@ keeps but rarely serves.
 | Qwen3.8-Flash-Next-AWQ-W4A16 | `/models/Qwen3.8-Flash-Next-AWQ-W4A16` |
 | GLM-5.3-Flash-AWQ-W4A16 | `/models/GLM-5.3-Flash-AWQ-W4A16` |
 | GLM-5.3 (full model, INT4/INT8 mixed quant) | `/models/GLM-5.3-Int4-Int8Mix` |
+| DeepSeek-V4.1-Flash | `/models/DeepSeek-V4.1-Flash` |
 | DeepSeek-V4-Flash-0731 | `/backup-models/deepseek-ai/DeepSeek-V4-Flash-0731` |
 | GLM-5.3 (full model, INT4 quant) | `/backup-models/GLM-5.3-AWQ-INT4` |
 
-The compose file mounts these paths by default. Set `DSV4_MODEL`, `QWEN_MODEL`,
-`QWEN_AWQ_MODEL`, `GLM_FLASH_MODEL`, `GLM_INT4_MODEL`, or `GLM_MIX_MODEL` to
-override the path for a single run.
+The compose file mounts these paths by default. Set `DSV4_MODEL`, `DSV41_MODEL`,
+`QWEN_MODEL`, `QWEN_AWQ_MODEL`, `GLM_FLASH_MODEL`, `GLM_INT4_MODEL`, or
+`GLM_MIX_MODEL` to override the path for a single run.
 
 The `qwen`, `qwen8gpu`, and `qwenawq` services need a
 `chat_template_lenient_system.jinja` file next to their model weights. That
@@ -637,6 +638,153 @@ the guard matches nothing and drops every draft.
 With both fixes the profile runs 24 copy-fidelity requests from 8,139 to
 124,652 tokens of context with no error and no engine death.
 
+## DeepSeek-V4.1-Flash
+
+The `dsv41` profile serves DeepSeek-V4.1-Flash on all 8 GPUs at the model's
+full 1,048,576-token context. The model has a 552-billion-parameter backbone
+in 40 layers. It activates 8 billion parameters in prefill and 16 billion in
+decode. It uses CSA2, a compressed sparse attention that stores 890 bytes of
+key-value data per token. It also carries Engram, a conditional memory of 196
+billion parameters that the runtime keeps in host memory.
+
+### The image
+
+No public image runs this model on sm_80. The build kit in
+[patches/vllm-backport-v41/](patches/vllm-backport-v41/) makes one.
+[`build.sh`](patches/vllm-backport-v41/build.sh) does five steps:
+
+1. Copy the `vllm` tree out of the `lazymio/vllm-backport:v0.12.0-sm80` image.
+2. Apply the vLLM pull request 56201 diff with `git apply --reject`.
+3. Run [`fixups.py`](patches/vllm-backport-v41/fixups.py), which repairs every
+   hunk the backport tree rejects, and adds the sm_80 changes below.
+4. Copy the three files in [`ampere/`](patches/vllm-backport-v41/ampere/) into
+   the tree.
+5. Build the image as `localhost/vllm-backport-v41:sm80`.
+
+The kit needs a vLLM checkout with the pull request fetched:
+
+```bash
+git clone --filter=blob:none https://github.com/vllm-project/vllm.git
+cd vllm && git fetch https://github.com/vllm-project/vllm.git pull/56201/head:pr56201
+cd ~/v41kit && VLLM_SRC=~/vllm bash build.sh
+```
+
+Every edit in `fixups.py` finds its place by a text anchor and runs twice with
+the same result. A missing anchor stops the run with the file name, so an
+upstream change fails loudly instead of building a wrong image.
+
+### Layout: 4-way tensor parallel across 2 pipeline stages
+
+The model configuration sets `kv_source_layer_ids` to `[2, 8, 14, 20]`. Layers that
+share one compressed key-value cache form a group. The groups are layers 0 to
+1, 2 to 7, 8 to 13, 14 to 19, and 20 to 39. vLLM refuses to split a group
+across pipeline stages:
+
+```
+NotImplementedError: PP splits inside a v4.1 kv-sharing group are not supported
+```
+
+The last group holds 20 of the 40 layers. Those 20 layers must sit on one
+stage. That caps the pipeline at 2 stages, so 8 GPUs means 4-way tensor
+parallel inside each stage. `VLLM_PP_LAYER_PARTITION` is `20,20`.
+
+This layout suits the PCIe topology. Each PEX8749 switch carries 4 GPUs, and
+vLLM numbers ranks tensor-parallel first. Tensor-parallel group 0 lands on
+GPUs 0 to 3 and group 1 on GPUs 4 to 7. Every all-reduce stays inside one
+switch. Only the pipeline hand-off crosses between switches, and that is one
+hidden-state tensor per micro-batch.
+
+### The sm_80 gaps the kit closes
+
+- Triton types a kernel parameter from the tensor dtype and rejects `fp8e4nv`
+  below SM89. The kit keeps those buffers as `torch.uint8` and converts in
+  software through `vllm/v1/attention/ops/fp8_sm80.py`.
+- `dequantize_and_gather_k_cache` picks its path with `has_cutedsl()`, which
+  only asks whether the package is installed. The CuteDSL kernels need SM90,
+  so sm_80 takes that path and the compiler aborts. The kit swaps in
+  `is_cutedsl_supported()`, which also tests the compute capability.
+- The compiled `_C` operator
+  `fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert` carries the V4.0
+  signature and takes 9 arguments. V4.1 passes a tenth, `apply_q_norm`.
+  Dropping it normalizes Q twice and gives wrong output with no error.
+  [`qnorm_rope_kv_insert.py`](patches/vllm-backport-v41/ampere/qnorm_rope_kv_insert.py)
+  replaces the operator with a Triton kernel that takes the flag.
+- Marlin packs 4 fp8 values into one int32, so the `wo_a` weight arrives with
+  the wrong shape. The kit routes that one layer to the emulation kernel.
+- The key-value cache grouping code asserts a `[MLA, *SWA]` layer order and
+  drops the 3 compressor circular buffers. The kit gives those buffers their
+  own group and appends it after the arithmetic.
+- Under pipeline parallel the DSpark drafter runs on the last stage and owns
+  no embedding table. It aliases the target table, which the target only
+  builds on the first stage. When a DSpark drafter is
+  configured, the kit builds that table on the last stage as well. The weight loader keys off the
+  parameter existing, so the weights arrive by themselves.
+
+### Speculative decoding with DSpark
+
+DSpark is the model's own speculator. The checkpoint carries 3 next-token
+layers that target layers 37 to 39. `DSV41_SPEC_K` sets the draft count and 5
+is the shipped value. At 3 the same server measures 41.4, 73.8 and 103.3
+tokens per second at 1, 4 and 8 streams. That is the same spread as 5, so
+this knob is not worth turning on this model.
+
+The extra embedding table on the last stage costs 272,501 tokens of key-value
+pool, which is under 2 percent.
+
+### Measured throughput
+
+Aggregate completion throughput, 512-token outputs, diverse short prompts,
+staggered starts. `tok/step` counts the tokens that one model step returns,
+so it shows how many DSpark drafts the target accepts.
+
+| concurrent requests | tok/s | per stream | tok/step | tok/s with DSpark off |
+|---|---|---|---|---|
+| 1 | 43.8 | 43.8 | 2.85 | 26.9 |
+| 4 | 72.9 | 18.2 | 2.31 | 63.6 |
+| 8 | 104.2 | 13.0 | 2.42 | 97.5 |
+
+DSpark is worth 63 percent single-stream and 7 percent at 8 streams here. The
+last column is the same server with `--speculative-config` removed.
+
+The key-value pool holds 14,058,003 tokens. That is 13.41 concurrent requests
+at the full 1,048,576-token context.
+
+Prefill runs at 1,584, 1,650 and 1,389 tokens per second for prompts of
+39,028, 119,028 and 319,028 tokens.
+
+### Acceptance depends on the prompt
+
+DSpark acceptance moves more with prompt content than with any setting. One
+stream, 512-token outputs, greedy sampling:
+
+| prompt class | accepted of drafted | tok/s |
+|---|---|---|
+| repetitive text | 0.644 | 85.6 |
+| code | 0.451 | 66.6 |
+| technical prose | 0.277 | 49.3 |
+| descriptive prose | 0.261 | 48.0 |
+
+Read any single decode number against the prompt that produced it. The
+synthetic filler in the concurrency benchmark is high-entropy text, which is
+the worst case for a speculator.
+
+### The profile does not set `--max-num-batched-tokens`
+
+Speculative decoding makes vLLM pick 2048 and print this warning:
+
+```
+max_num_scheduled_tokens is set to 2048 based on the speculative decoding
+settings. This may lead to suboptimal performance. Consider increasing
+max_num_batched_tokens
+```
+
+Ignore that warning on this box. At 8192 the same server measures 1,574 and
+1,673 tokens per second of prefill against 1,584 and 1,650, which is inside
+the run-to-run spread. Decode drops to 39.1, 68.9 and 93.6 tokens per second
+at 1, 4 and 8 streams. The key-value pool falls from 14,058,003 to 8,121,690
+tokens. Prefill on this box is bound by the work inside one chunk, not by the
+number of chunks.
+
 ## Persisted JIT and compile caches
 
 Both vLLM containers write several just-in-time compile caches under `/root` inside
@@ -654,7 +802,7 @@ wrapper around one `podman compose --profile <name> up -d` call.
 [`stop-all-podman.sh`](scripts/stop-all-podman.sh) holds the list of every
 profile and a `stop_all` function that brings all of them down. Every other
 script sources it and calls `stop_all` before it starts its own profile,
-because all ten profiles share port 8098.
+because all eleven profiles share port 8098.
 
 - `run-pp-dspark-podman.sh` starts the DeepSeek-V4-Flash `dsv4` service, the fork
   build. It also checks GPU health before the start. If it finds a wedged GPU
@@ -678,3 +826,5 @@ because all ten profiles share port 8098.
   (GLM-5.3-AWQ-INT4, all 8 GPUs).
 - `run-glm53-mix-8gpu-podman.sh` starts the `glm53mix8gpu` profile
   (GLM-5.3-Int4-Int8Mix, all 8 GPUs).
+- `run-dsv41-podman.sh` starts the `dsv41` profile
+  (DeepSeek-V4.1-Flash, all 8 GPUs).

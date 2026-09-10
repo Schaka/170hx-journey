@@ -549,6 +549,76 @@ services:
       - --reasoning-parser
       - glm45
 
+  dsv41:
+    image: ${DSV41_IMAGE:-localhost/vllm-backport-v41:sm80}
+    container_name: deepseek-v41-flash
+    profiles: ["dsv41"]
+    devices:
+      - nvidia.com/gpu=all
+    shm_size: "16g"
+    ports:
+      - "8098:8000"
+    environment:
+      NCCL_ALGO: "Ring"
+      NCCL_PROTO: "Simple"
+      PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
+      OMP_NUM_THREADS: "1"
+      VLLM_PP_LAYER_PARTITION: "${DSV41_PARTITION:-20,20}"
+    volumes:
+      - ${DSV41_MODEL:-/models/DeepSeek-V4.1-Flash}:/model
+      - ${HOME}/cache/dsv41/vllm:/root/.cache/vllm
+      - ${HOME}/cache/dsv41/flashinfer:/root/.cache/flashinfer
+      - ${HOME}/cache/dsv41/triton:/root/.triton
+      - ${HOME}/cache/dsv41/nv:/root/.nv
+      - ${HOME}/cache/dsv41/humming:/root/.humming
+      - ${HOME}/cache/dsv41/cupy:/root/.cupy
+      - ${HOME}/cache/dsv41/tilelang:/root/.tilelang
+    command:
+      - /model
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --served-model-name
+      - deepseek-v4.1-flash
+      # Layers 20 to 39 share one compressed KV cache. vLLM refuses to split a
+      # sharing group across pipeline stages, so those 20 layers must sit on
+      # one stage. That fixes the layout at 2 stages of 4 GPUs.
+      - --tensor-parallel-size
+      - "4"
+      - --pipeline-parallel-size
+      - "2"
+      - --attention-backend
+      - TRITON_MLA_SPARSE_DSV41
+      - --kv-cache-dtype
+      - fp8_ds_mla
+      # 128 is the only size the sm_80 sparse-MLA kernel takes, and it is a
+      # multiple of the 32 the sliding-window backend wants. A 256-token
+      # manager block would have to split into two kernel blocks, which the
+      # padded BLHNC page layout cannot express.
+      - --block-size
+      - "${DSV41_BLOCK:-128}"
+      - --dtype
+      - bfloat16
+      - --max-model-len
+      - "${DSV41_MAXLEN:-1048576}"
+      - --gpu-memory-utilization
+      - "${DSV41_UTIL:-0.92}"
+      - --max-num-seqs
+      - "8"
+      - --enable-expert-parallel
+      - --enable-prefix-caching
+      - --enable-prompt-tokens-details
+      - --disable-custom-all-reduce
+      # DSpark is the V4.1 own speculator: 3 next-token layers that target
+      # layers 37 to 39, already inside the checkpoint. Set DSV41_SPEC_K to
+      # compare draft counts.
+      - --speculative-config
+      - '{"method":"dspark","num_speculative_tokens":${DSV41_SPEC_K:-5}}'
+      # The sm_80 build has no compiled kernel for the warm-up path.
+      - --kernel-config
+      - '{"enable_jit_warmup": false}'
+
   qwen8gpu:
     image: ${QWEN_IMAGE:-docker.io/lazymio/vllm-backport:latest-sm80}
     container_name: qwen3-flash-next-8gpu
