@@ -15,7 +15,7 @@ services:
       DSV4_REP_FUZZY_MIN_HITS: "15"
       DSV4_RECOVERY_MODE: "${DSV4_RECOVERY_MODE:-nudge}"
     volumes:
-      - ${DSV4_MODEL:-/models/deepseek-ai/DeepSeek-V4-Flash-0731}:/model
+      - ${DSV4_MODEL:-/backup-models/deepseek-ai/DeepSeek-V4-Flash-0731}:/model
       # These paths hold JIT and compile caches. Without this mount, every
       # first start redoes a multi-minute torch.compile pass and a
       # FlashInfer/Triton JIT warmup from scratch.
@@ -74,7 +74,7 @@ services:
       NCCL_ALGO: "Ring"
       NCCL_PROTO: "Simple"
     volumes:
-      - ${DSV4_MODEL:-/models/deepseek-ai/DeepSeek-V4-Flash-0731}:/model
+      - ${DSV4_MODEL:-/backup-models/deepseek-ai/DeepSeek-V4-Flash-0731}:/model
       - ${HOME}/cache/dsv4backport/vllm:/root/.cache/vllm
       - ${HOME}/cache/dsv4backport/flashinfer:/root/.cache/flashinfer
       - ${HOME}/cache/dsv4backport/triton:/root/.triton
@@ -372,7 +372,7 @@ services:
       NCCL_ALGO: "Ring"
       NCCL_PROTO: "Simple"
     volumes:
-      - ${GLM_INT4_MODEL:-/models/GLM-5.3-AWQ-INT4}:/model
+      - ${GLM_INT4_MODEL:-/backup-models/GLM-5.3-AWQ-INT4}:/model
       - ${HOME}/cache/glm53int4/vllm:/root/.cache/vllm
       - ${HOME}/cache/glm53int4/flashinfer:/root/.cache/flashinfer
       - ${HOME}/cache/glm53int4/triton:/root/.triton
@@ -427,7 +427,7 @@ services:
       PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
       GLM53_IDX_PREFILL_BUF_TOKENS: "${GLM_INT4_IDX_BUF:-4000000}"
     volumes:
-      - ${GLM_INT4_MODEL:-/models/GLM-5.3-AWQ-INT4}:/model
+      - ${GLM_INT4_MODEL:-/backup-models/GLM-5.3-AWQ-INT4}:/model
       - ${HOME}/patches/vllm-backport/deepseek_v32-fused-q-sm80-fp8.py:/usr/local/lib/python3.12/dist-packages/vllm/models/deepseek_v32/common/kernels.py:ro
       - ${HOME}/patches/vllm-backport/mla-attention-sparse-mha-no-prefill.py:/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/attention/mla_attention.py:ro
       - ${HOME}/patches/vllm-backport/mla-fp8-sm80-kernel.py:/usr/local/lib/python3.12/dist-packages/vllm/_glm53_mla_fp8.py:ro

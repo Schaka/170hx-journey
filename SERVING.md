@@ -9,16 +9,19 @@ mutually exclusive on this host, because they all bind port 8098.
 
 ## Model files
 
-Model weights live on the `/models` mount (`/dev/md0`), one directory per model:
+Model weights live on two RAID 0 arrays. See the storage section in
+[HARDWARE.md](HARDWARE.md). The `/models` mount holds the models that this box
+serves every day. The `/backup-models` mount holds the models that this box
+keeps but rarely serves.
 
 | model | path |
 |---|---|
-| DeepSeek-V4-Flash-0731 | `/models/deepseek-ai/DeepSeek-V4-Flash-0731` |
 | Qwen3.8-Flash-Next-FP8 | `/models/Qwen` |
 | Qwen3.8-Flash-Next-AWQ-W4A16 | `/models/Qwen3.8-Flash-Next-AWQ-W4A16` |
 | GLM-5.3-Flash-AWQ-W4A16 | `/models/GLM-5.3-Flash-AWQ-W4A16` |
-| GLM-5.3 (full model, INT4 quant) | `/models/GLM-5.3-AWQ-INT4` |
 | GLM-5.3 (full model, INT4/INT8 mixed quant) | `/models/GLM-5.3-Int4-Int8Mix` |
+| DeepSeek-V4-Flash-0731 | `/backup-models/deepseek-ai/DeepSeek-V4-Flash-0731` |
+| GLM-5.3 (full model, INT4 quant) | `/backup-models/GLM-5.3-AWQ-INT4` |
 
 The compose file mounts these paths by default. Set `DSV4_MODEL`, `QWEN_MODEL`,
 `QWEN_AWQ_MODEL`, `GLM_FLASH_MODEL`, `GLM_INT4_MODEL`, or `GLM_MIX_MODEL` to

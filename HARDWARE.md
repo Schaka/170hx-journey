@@ -49,6 +49,22 @@ If the output reads `Active` on a card that is not thermally limited or power li
 the platform asserts `PWRBRK#`. To fix this, place Kapton tape over pin B30 on the
 card edge connector. You can also use a riser that does not route B30.
 
+## Storage
+
+The box has two RAID 0 arrays for model weights. RAID 0 stripes data across
+drives for speed and gives no redundancy.
+
+`/dev/md0` mounts at `/models`. It stripes four NVMe drives of 512 GB each and
+gives 1.9 TiB. This array holds the models that the box serves every day.
+
+`/dev/md1` mounts at `/backup-models`. It stripes two Intel SSDSC2BB012T4 SATA
+SSDs of 1.2 TB each and gives 2.2 TiB. This array holds the models that the box
+keeps but rarely serves.
+
+Both arrays use a 512 KB chunk and an ext4 filesystem. `/etc/fstab` mounts both
+by filesystem UUID with the `nofail` option. A missing array will not stop the
+boot. `/etc/mdadm.conf` names `/dev/md1` by array UUID.
+
 ## Power limit and clock tuning
 
 Each card ships with a 250 W limit and a 300 W hardware maximum. This host
