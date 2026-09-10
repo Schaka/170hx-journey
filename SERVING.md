@@ -574,8 +574,14 @@ last column is the same server with `--speculative-config` removed.
 Measure concurrency with long generations. A 256-token run at 8 streams
 returns anywhere from 54 to 105 tokens per second on an unchanged server.
 The first part of a generation runs faster than the steady state. A
-512-token run repeats within 4 percent. Single-stream and prefill are stable
-at any run length.
+512-token run still swings by up to 5 percent between runs, so read any
+decode change below that as noise. Prefill is stable to 0.2 percent at a
+fixed prompt length.
+
+`GLM_MIX_SPEC_K` sets the MTP draft count, and 3 is the shipped value. At 2
+the same server measures 25.2 to 26.0, 59.8 to 63.2, and 84.7 to 88.5 tokens
+per second at 1, 4 and 8 streams. That is the same spread as 3, so this knob
+is not worth turning on this model.
 
 The CUDA graph capture sizes run up to 48 rather than the default 8. A
 decode batch wider than 8 then keeps its graph instead of falling back to
