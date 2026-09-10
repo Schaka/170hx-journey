@@ -579,8 +579,8 @@ the request more tokens than the step can hold. The crash starts at about
 The fix holds a request back until its own sampling step lands, which is the
 serialization that plain decoding gets for free. It gates on sampling steps
 only. A pure prefill chunk ships no sampled token and no draft, so those
-chunks still pipeline across the stages. Serializing them too costs 8 times
-on prefill.
+chunks still pipeline across the stages. bayley reports that serializing
+them too costs 8 times on prefill.
 
 The guard identifies a settled request by `num_computed_tokens ==
 num_tokens`. bayley's original uses `num_tokens - 1`, because his vLLM does
