@@ -619,6 +619,74 @@ services:
       - --kernel-config
       - '{"enable_jit_warmup": false}'
 
+  dsv416:
+    image: ${DSV416_IMAGE:-localhost/vllm-backport-v41:sm80-6card}
+    container_name: deepseek-v41-flash-6gpu
+    profiles: ["dsv416"]
+    devices:
+      - nvidia.com/gpu=0
+      - nvidia.com/gpu=1
+      - nvidia.com/gpu=2
+      - nvidia.com/gpu=3
+      - nvidia.com/gpu=4
+      - nvidia.com/gpu=5
+    shm_size: "16g"
+    ports:
+      - "8098:8000"
+    environment:
+      NCCL_ALGO: "Ring"
+      NCCL_PROTO: "Simple"
+      PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
+      OMP_NUM_THREADS: "1"
+      # Cuts at layers 14 and 28. Layer 14 is a kv-sharing group boundary.
+      # Layer 28 falls inside the layer 20 to 39 group, which the relay
+      # patch supports. The last stage carries the head, the DSpark drafter
+      # and the extra embedding, so it takes 2 layers fewer.
+      VLLM_PP_LAYER_PARTITION: "${DSV416_PARTITION:-14,14,12}"
+    volumes:
+      - ${DSV41_MODEL:-/models/DeepSeek-V4.1-Flash}:/model
+      - ${HOME}/cache/dsv416/vllm:/root/.cache/vllm
+      - ${HOME}/cache/dsv416/flashinfer:/root/.cache/flashinfer
+      - ${HOME}/cache/dsv416/triton:/root/.triton
+      - ${HOME}/cache/dsv416/nv:/root/.nv
+      - ${HOME}/cache/dsv416/humming:/root/.humming
+      - ${HOME}/cache/dsv416/cupy:/root/.cupy
+      - ${HOME}/cache/dsv416/tilelang:/root/.tilelang
+    command:
+      - /model
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --served-model-name
+      - deepseek-v4.1-flash
+      - --tensor-parallel-size
+      - "2"
+      - --pipeline-parallel-size
+      - "3"
+      - --attention-backend
+      - TRITON_MLA_SPARSE_DSV41
+      - --kv-cache-dtype
+      - fp8_ds_mla
+      - --block-size
+      - "${DSV416_BLOCK:-128}"
+      - --dtype
+      - bfloat16
+      - --max-model-len
+      - "${DSV416_MAXLEN:-1048576}"
+      - --gpu-memory-utilization
+      - "${DSV416_UTIL:-0.95}"
+      - --max-num-seqs
+      - "8"
+      - --enable-expert-parallel
+      - --enable-prefix-caching
+      - --enable-prompt-tokens-details
+      - --disable-custom-all-reduce
+      - --speculative-config
+      - '{"method":"dspark","num_speculative_tokens":${DSV416_SPEC_K:-5}}'
+      - --kernel-config
+      - '{"enable_jit_warmup": false}'
+
   qwen8gpu:
     image: ${QWEN_IMAGE:-docker.io/lazymio/vllm-backport:latest-sm80}
     container_name: qwen3-flash-next-8gpu

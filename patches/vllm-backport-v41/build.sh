@@ -55,6 +55,8 @@ mkdir -p "$WORK/vllm/models/deepseek_v4_1/ampere"
 cp "$KIT/ampere/__init__.py" "$KIT/ampere/ampere_sparse.py" \
    "$KIT/ampere/qnorm_rope_kv_insert.py" \
    "$WORK/vllm/models/deepseek_v4_1/ampere/"
+# The relay is not Ampere-specific, so it sits beside the model itself.
+cp "$KIT/ampere/pp_kv_group_relay.py" "$WORK/vllm/models/deepseek_v4_1/"
 
 # 4. Ship only the files that changed, found with a throwaway git index.
 rm -rf "$WORK/ctx" "$WORK/gitdiff"

@@ -797,3 +797,321 @@ sub(_MODEL,
         )
         if get_pp_group().is_first_rank or _draft_needs_embed:
             self.embed_tokens = VocabParallelEmbedding(""")
+
+# --- allow a pipeline cut inside a kv-sharing group ------------------------
+# Layers 20 to 39 read one compressed KV cache and one indexer K cache that
+# layer 20 writes. Stock vLLM refuses a pipeline cut inside that range, which
+# pins those 20 layers to one stage and forces 8 GPUs. The relay module gives
+# a later stage its own copy of both caches and refills them from the source
+# latent, which rides the pipeline hop. See ampere/pp_kv_group_relay.py.
+_ATT = "vllm/models/deepseek_v4_1/attention.py"
+
+# 1. The indexer K cache. Build a local one instead of refusing.
+sub(_ATT,
+    """                index_k_cache = self._static_forward_context.get(k_cache_prefix)
+                if index_k_cache is None:
+                    raise NotImplementedError(
+                        f"Indexer K cache source {k_cache_prefix} not found on "
+                        "this rank; PP splits inside a v4.1 kv-sharing group "
+                        "are not supported."
+                    )""",
+    """                index_k_cache = self._static_forward_context.get(k_cache_prefix)
+                if index_k_cache is None:
+                    # The source sits on an earlier pipeline stage. Own a
+                    # copy here; the relay refills it every step.
+                    index_k_cache = DeepseekV4IndexerCache(
+                        head_dim=_indexer_k_cache_head_dim(
+                            config.index_head_dim, dsa_indexer_uses_fp4(vllm_config)
+                        ),
+                        dtype=torch.uint8,
+                        prefix=k_cache_prefix,
+                        cache_config=cache_config,
+                        compress_ratio=self.compress_ratio,
+                    )
+                    self._relay_index_k_cache = index_k_cache""")
+
+# 2. The compressed KV cache. Build the replica and the relay.
+sub(_ATT,
+    """            if (
+                not self.is_kv_source
+                and self.compressed_cache_prefix not in self._static_forward_context
+            ):
+                raise NotImplementedError(
+                    f"Compressed-KV source {self.compressed_cache_prefix} not "
+                    "found on this rank; PP splits inside a v4.1 kv-sharing "
+                    "group are not supported."
+                )""",
+    """            if (
+                not self.is_kv_source
+                and self.compressed_cache_prefix not in self._static_forward_context
+            ):
+                from vllm.models.deepseek_v4_1.pp_kv_group_relay import build_relay
+
+                # The source sits on an earlier pipeline stage. The first
+                # consumer on this stage builds the replica set, and every
+                # later consumer resolves to it through the forward context.
+                build_relay(
+                    consumer_attn=self,
+                    source_attn_prefix=self.compressed_cache_prefix,
+                    index_k_cache=getattr(self, "_relay_index_k_cache", None),
+                    cache_config=cache_config,
+                    config=config,
+                )""")
+
+# 3. The source layer publishes its latent for the next stage.
+# The copy sits after both parallel blocks join. The compressor runs on an
+# auxiliary stream, so a copy placed earlier can read the latent before that
+# stream has written it.
+sub(_ATT,
+    """        index_q, index_q_scale, index_weights_out = indexer_result""",
+    """        index_q, index_q_scale, index_weights_out = indexer_result
+
+        if latent is not None and self._relay_latent_buffer is not None:
+            # The next pipeline stage rebuilds both cache writes from this.
+            self._relay_latent_buffer[: latent.shape[0]].copy_(latent)""")
+
+# The buffer defaults to None, so a layer that publishes nothing costs nothing.
+sub(_ATT,
+    """        self.topk_indices_buffer = topk_indices_buffer
+        self.candidate_block_buffer = candidate_block_buffer""",
+    """        self.topk_indices_buffer = topk_indices_buffer
+        self.candidate_block_buffer = candidate_block_buffer
+        # Set by the model on the one kv-source layer whose group continues
+        # onto the next pipeline stage.
+        self._relay_latent_buffer: torch.Tensor | None = None""")
+print("relay fixups done")
+
+_M41 = "vllm/models/deepseek_v4_1/nvidia/model.py"
+
+# 4. Collect the relays the layers built, and give the last local kv source a
+# buffer to publish its latent into.
+sub(_M41,
+    """        # The n-gram hash needs a slot-keyed rolling store of compressed ids""",
+    """        from vllm.models.deepseek_v4_1.pp_kv_group_relay import take_relays
+
+        # A pipeline cut inside a kv-sharing group leaves readers on this
+        # stage without their writer. The consumer layers built one relay per
+        # split group. Register them so their weights load and move to device.
+        self.kv_group_relays = nn.ModuleList(take_relays())
+
+        # Every stage that sends carries the latent slot, whether or not it
+        # fills it. A stage that never fills it still keeps the pipeline
+        # payload the same shape on both sides of the hop.
+        self._relay_latent_buffer: torch.Tensor | None = None
+        if get_pp_group().world_size > 1 and not get_pp_group().is_last_rank:
+            # Zeroed, not empty. A step where the source produces no latent
+            # leaves these rows untouched, and the receiving stage still
+            # writes them. Uninitialized memory would put NaN in the cache.
+            self._relay_latent_buffer = torch.zeros(
+                vllm_config.scheduler_config.max_num_batched_tokens,
+                config.head_dim,
+                dtype=vllm_config.model_config.dtype,
+            )
+            _local_sources = [
+                layer
+                for layer in islice(self.layers, self.start_layer, self.end_layer)
+                if isinstance(layer, DeepseekV4DecoderLayer)
+                and getattr(layer.attn, "is_kv_source", False)
+            ]
+            if _local_sources:
+                # Only the last one can own a group that continues onward.
+                _local_sources[-1].attn._relay_latent_buffer = (
+                    self._relay_latent_buffer
+                )
+
+        # The n-gram hash needs a slot-keyed rolling store of compressed ids""")
+
+# 5. Carry the latent across the pipeline hop.
+sub(_M41,
+    """                "pre_mix": torch.zeros(
+                    (batch_size, self.hc_mult),
+                    dtype=torch.float32,
+                    device=device,
+                ),
+            }
+        )""",
+    """                "pre_mix": torch.zeros(
+                    (batch_size, self.hc_mult),
+                    dtype=torch.float32,
+                    device=device,
+                ),
+                # The compressor latent of the last kv source on the sending
+                # stage. Refills the replicated caches of a split group.
+                "kv_latent": torch.zeros(
+                    (batch_size, self.config.head_dim),
+                    dtype=dtype,
+                    device=device,
+                ),
+            }
+        )""")
+
+sub(_M41,
+    """        if not get_pp_group().is_last_rank:
+            return IntermediateTensors(
+                {"hidden_states": hidden_states, "pre_mix": pre_mix}
+            )""",
+    """        if not get_pp_group().is_last_rank:
+            assert self._relay_latent_buffer is not None
+            return IntermediateTensors(
+                {
+                    "hidden_states": hidden_states,
+                    "pre_mix": pre_mix,
+                    "kv_latent": self._relay_latent_buffer[: positions.shape[0]],
+                }
+            )""")
+
+# 6. Refill the replicated caches before any consumer layer reads them.
+sub(_M41,
+    """        if not get_pp_group().is_first_rank:
+            assert intermediate_tensors is not None
+            pre_mix = intermediate_tensors["pre_mix"]""",
+    """        if not get_pp_group().is_first_rank:
+            assert intermediate_tensors is not None
+            pre_mix = intermediate_tensors["pre_mix"]
+            for _relay in self.kv_group_relays:
+                _relay.write(
+                    intermediate_tensors["kv_latent"][: positions.shape[0]],
+                    positions,
+                )""")
+
+# 7. Let the shadow weights load under their source-layer checkpoint names.
+sub(_M41,
+    """        params_dict = dict(self.named_parameters())""",
+    """        params_dict = dict(self.named_parameters())
+        if self.kv_group_relays:
+            from vllm.models.deepseek_v4_1.pp_kv_group_relay import (
+                alias_source_params,
+            )
+
+            alias_source_params(list(self.kv_group_relays), params_dict)""")
+print("relay model fixups done")
+
+# 8. The source layer is a PPMissingLayer on a stage that only reads its
+# group, so is_pp_missing_parameter reports the shadow weights as absent and
+# the loader skips them. Uninitialized index keys make the sparse indexer
+# select the wrong tokens, which reads as fluent text about the wrong part of
+# the context. Consult the relay alias names before trusting that report.
+sub(_M41,
+    """        params_dict = dict(self.named_parameters())
+        if self.kv_group_relays:
+            from vllm.models.deepseek_v4_1.pp_kv_group_relay import (
+                alias_source_params,
+            )
+
+            alias_source_params(list(self.kv_group_relays), params_dict)""",
+    """        params_dict = dict(self.named_parameters())
+        _relay_aliases: set[str] = set()
+        if self.kv_group_relays:
+            from vllm.models.deepseek_v4_1.pp_kv_group_relay import (
+                alias_names,
+                alias_source_params,
+            )
+
+            alias_source_params(list(self.kv_group_relays), params_dict)
+            _relay_aliases = alias_names(list(self.kv_group_relays))
+
+        def _pp_missing(param_name: str) -> bool:
+            if param_name in _relay_aliases:
+                return False
+            return is_pp_missing_parameter(param_name, self)""")
+
+sub(_M41,
+    """                if is_pp_missing_parameter(name, self):
+                    break""",
+    """                if _pp_missing(name):
+                    break""")
+
+sub(_M41,
+    """                        if is_pp_missing_parameter(name_mapped, self):
+                            continue""",
+    """                        if _pp_missing(name_mapped):
+                            continue""")
+
+sub(_M41,
+    """                elif "attn_sink" in name:
+                    if is_pp_missing_parameter(name, self):
+                        continue""",
+    """                elif "attn_sink" in name:
+                    if _pp_missing(name):
+                        continue""")
+
+sub(_M41,
+    """                else:
+                    if is_pp_missing_parameter(name, self):
+                        continue
+                    # Non-LoRA params on a LoRA-wrapped module live at""",
+    """                else:
+                    if _pp_missing(name):
+                        continue
+                    # Non-LoRA params on a LoRA-wrapped module live at""")
+print("relay weight-loading fixups done")
+
+
+
+# --- relay the candidate blocks too ----------------------------------------
+# Layer 20 is the candidate source. It publishes its top candidate blocks into
+# a buffer that every later indexer masks its scores against. A stage that
+# holds those later layers but not layer 20 has an empty buffer, so its
+# indexers select the wrong tokens. Carry the buffer across the hop.
+sub(_M41,
+    """                # The compressor latent of the last kv source on the sending
+                # stage. Refills the replicated caches of a split group.
+                "kv_latent": torch.zeros(
+                    (batch_size, self.config.head_dim),
+                    dtype=dtype,
+                    device=device,
+                ),
+            }
+        )""",
+    """                # The compressor latent of the last kv source on the sending
+                # stage. Refills the replicated caches of a split group.
+                "kv_latent": torch.zeros(
+                    (batch_size, self.config.head_dim),
+                    dtype=dtype,
+                    device=device,
+                ),
+                **(
+                    {
+                        "candidate_blocks": torch.zeros(
+                            (batch_size, self.candidate_block_buffer.shape[1]),
+                            dtype=torch.int32,
+                            device=device,
+                        )
+                    }
+                    if self.candidate_block_buffer is not None
+                    else {}
+                ),
+            }
+        )""")
+
+sub(_M41,
+    """                    "kv_latent": self._relay_latent_buffer[: positions.shape[0]],
+                }
+            )""",
+    """                    "kv_latent": self._relay_latent_buffer[: positions.shape[0]],
+                    **(
+                        {
+                            "candidate_blocks": self.candidate_block_buffer[
+                                : positions.shape[0]
+                            ]
+                        }
+                        if self.candidate_block_buffer is not None
+                        else {}
+                    ),
+                }
+            )""")
+
+sub(_M41,
+    """            for _relay in self.kv_group_relays:
+                _relay.write(""",
+    """            if (
+                self.candidate_block_buffer is not None
+                and "candidate_blocks" in intermediate_tensors.tensors
+            ):
+                _n = positions.shape[0]
+                self.candidate_block_buffer[:_n].copy_(
+                    intermediate_tensors["candidate_blocks"][:_n]
+                )
+            for _relay in self.kv_group_relays:
+                _relay.write(""")
+print("candidate relay done")

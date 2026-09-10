@@ -768,6 +768,81 @@ Read any single decode number against the prompt that produced it. The
 synthetic filler in the concurrency benchmark is high-entropy text, which is
 the worst case for a speculator.
 
+### dsv416: the same model on 6 GPUs
+
+The `dsv416` profile serves DeepSeek-V4.1-Flash on GPUs 0 to 5, with
+tensor-parallel-size 2 and pipeline-parallel-size 3. It frees 2 cards for
+other work and it prefills faster than the 8-card profile. It holds far less
+key-value cache, so it suits single long sessions rather than many parallel
+ones.
+
+| measure | 6 GPUs | 8 GPUs |
+|---|---|---|
+| decode, 1 stream | 43.3 tok/s | 43.8 tok/s |
+| decode, 4 streams | 85.5 tok/s | 72.9 tok/s |
+| prefill, 119,025 tokens | 2,551 tok/s | 1,650 tok/s |
+| key-value pool | 3,049,911 tokens | 14,058,003 tokens |
+| concurrency at 1,048,576 tokens | 2.91x | 13.41x |
+
+Prefill gains because tensor-parallel-size 2 splits each all-reduce over 2
+cards inside one PLX switch, in place of 4. Decode at 4 streams gains for the
+same reason. The key-value pool falls because the same weights sit on 6 cards
+in place of 8, which leaves less free memory on each one.
+
+#### Splitting a kv-sharing group across pipeline stages
+
+Six cards needs a pipeline cut inside the layer 20 to 39 group. That group
+weighs about 154.6 GiB and does not fit on 2 cards. Layer 20 publishes three
+things that every later layer in the group reads:
+
+- the compressed key-value cache,
+- the indexer key cache,
+- the candidate blocks that every later indexer masks its scores against.
+
+[`pp_kv_group_relay.py`](patches/vllm-backport-v41/ampere/pp_kv_group_relay.py)
+gives the third stage its own copy of both caches and refills them each step.
+The payload is the compressor latent, `[num_tokens, 512]` in bfloat16. Both
+cache writes are pure functions of that latent, the token positions, the
+rotary cache and the slot mapping, so the third stage recomputes them. The
+candidate blocks ride the same pipeline hop as a second tensor.
+
+The third stage also needs the `wk` and `k_norm` weights of the layer 20
+indexer, about 64 thousand parameters, to derive the index keys. The relay
+registers them under the names the checkpoint uses, which are relative to the
+inner model and not the forward-context path.
+
+Layer 20 is a `PPMissingLayer` on the third stage, so
+`is_pp_missing_parameter` reports every name under it as absent and the
+loader skips it. The kit consults the relay alias names before it trusts that
+report.
+
+#### Choosing the layer partition
+
+`VLLM_PP_LAYER_PARTITION` is `14,14,12`. The cut at layer 14 falls on a
+kv-sharing group boundary. The cut at layer 28 falls inside the layer 20 to
+39 group, which the relay supports. The last stage takes 2 layers fewer
+for a reason. It also carries the head, the DSpark drafter and the embedding
+table that DSpark needs there. Those add about 5.1 GiB.
+
+Weights land at 50.32, 49.45 and 47.77 GiB per card. A partition of
+`14,12,14` puts 54.70 GiB on the last stage and the engine then reports:
+
+```
+ValueError: No available memory for the cache blocks.
+```
+
+The profile sets the memory fraction to 0.95, not 0.92. Six cards leave a
+much thinner margin than 8.
+
+#### Recall test
+
+Both profiles recall a fact planted at 15 percent and at 75 percent depth in
+prompts of 25,073 and 103,073 tokens. Send `thinking` and `reasoning_effort`
+in `chat_template_kwargs` on every request. V4.1 reads a numeric budget from
+1 to 100, where `low` is 25, `high` is 50, `xhigh` is 75 and `max` is 100.
+Without a value the model uses 50 and can drift into a repetition loop on
+long context.
+
 ### The profile does not set `--max-num-batched-tokens`
 
 Speculative decoding makes vLLM pick 2048 and print this warning:
@@ -802,7 +877,7 @@ wrapper around one `podman compose --profile <name> up -d` call.
 [`stop-all-podman.sh`](scripts/stop-all-podman.sh) holds the list of every
 profile and a `stop_all` function that brings all of them down. Every other
 script sources it and calls `stop_all` before it starts its own profile,
-because all eleven profiles share port 8098.
+because all twelve profiles share port 8098.
 
 - `run-pp-dspark-podman.sh` starts the DeepSeek-V4-Flash `dsv4` service, the fork
   build. It also checks GPU health before the start. If it finds a wedged GPU
@@ -828,3 +903,5 @@ because all eleven profiles share port 8098.
   (GLM-5.3-Int4-Int8Mix, all 8 GPUs).
 - `run-dsv41-podman.sh` starts the `dsv41` profile
   (DeepSeek-V4.1-Flash, all 8 GPUs).
+- `run-dsv41-6gpu-podman.sh` starts the `dsv416` profile
+  (DeepSeek-V4.1-Flash, 6 GPUs).
