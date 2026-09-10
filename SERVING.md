@@ -185,8 +185,9 @@ quantization has two, on 4 and 8 GPUs.
 
 ### A patch for MTP speculative decoding under pipeline parallel
 
-`glm53flash` and `glm53flash6gpu` below both use
-pipeline parallel, and both mount a patch file over the vllm-backport image:
+`glm53flash`, `glm53flash6gpu` and `glm53mix8gpu` below all use
+pipeline parallel with MTP, and all mount a patch file over the
+vllm-backport image:
 [`patches/vllm-backport/mtp-embed-from-checkpoint.py`](patches/vllm-backport/mtp-embed-from-checkpoint.py),
 at
 `/usr/local/lib/python3.12/dist-packages/vllm/v1/worker/gpu/spec_decode/eagle/utils.py`.
@@ -451,7 +452,6 @@ the cast.
 Keep every such buffer `torch.uint8`. On the host, once the kernel returns,
 call `.view(torch.float8_e4m3fn)`. Both dtypes are 1 byte, so the view costs
 nothing.
-| `scheduler-pp-spec-stale-drafts.py` | drops draft tokens that did not ride on a request's own latest verified token. Only matters with speculative decoding on. See the MTP section below |
 
 The fp8 kernel computes its cache offsets in int64. An int32 offset
 overflows above about 3.27 million KV slots and faults with Xid 31, even
@@ -466,7 +466,7 @@ which hit the same overflow on the bf16 kernel.
 different quantization:
 [Tech2wild/GLM-5.3-Int4-Int8Mix](https://huggingface.co/Tech2wild/GLM-5.3-Int4-Int8Mix).
 The checkpoint is 377 GB on disk. It serves the model's **full 1,048,576-token
-context** on all 8 GPUs, with a KV pool of 1,307,392 tokens, or 1.25 requests
+context** on all 8 GPUs, with a KV pool of 1,411,264 tokens, or 1.35 requests
 at the full length.
 
 #### Why this checkpoint and not the cyankiwi one
@@ -507,81 +507,88 @@ dense and cost 0.4 to 0.8 GB each instead of 4.8 GB. Stage 7 takes 7 layers
 because it also holds `lm_head` and the whole MTP block.
 
 The KV cache uses the packed `fp8_ds_mla` layout, through the same patches
-and the same `TRITON_MLA_SPARSE` backend as `glm53int48gpu` above.
-Speculative decoding is off. See the section below for why.
+and the same `TRITON_MLA_SPARSE` backend as `glm53int48gpu` above. MTP
+speculative decoding runs at 3 draft tokens. Set `GLM_MIX_SPEC_K` to change
+that count.
+
+#### Two more patch files
+
+This profile mounts the five patch files of `glm53int48gpu` above, plus
+`mtp-embed-from-checkpoint.py` and these two:
+
+| patch | fixes |
+|---|---|
+| `deepseek_v32-pp-topk-relay.py` | the model sets `index_topk_freq` to 4. Only layers 0, 1, 2 and every fourth layer after that run a full sparse indexer. Every other layer reuses the last selections from a buffer that belongs to one rank. A pipeline stage that starts on a reusing layer reads the previous batch's selections. The patch carries the selections over the pipeline hop and seeds the receiving rank's buffer. Set `GLM53_PP_TOPK_RELAY=0` to turn it off |
+| `scheduler-pp-spec.py` | two scheduler fixes for MTP under pipeline parallel. It drops draft tokens that did not ride on a request's own latest verified token. It also holds a request back until its own sampling step lands. Set `GLM53_PP_SPEC_SERIALIZE=0` to turn the second one off |
+
+The relay costs about 5 percent of aggregate decode at 8 streams, and about
+1 percent single-stream. The price is the `[tokens, 2048]` int32 tensor that
+each hop now carries. The KV pool does not shrink for it.
+
+No layer split avoids the relay. To avoid it, every stage must start on a
+full-indexer layer. Stage sizes must then be multiples of 4, which forces
+stages of 12 dense-MoE layers. Those stages run out of memory on a 64 GB
+card.
 
 #### Measured throughput
 
-Aggregate completion throughput, 256-token outputs, diverse short prompts:
+Aggregate completion throughput, 512-token outputs, diverse short prompts,
+staggered starts. `tok/step` counts the tokens that one model step returns,
+so it shows how many MTP drafts the target accepts.
 
-| concurrent requests | aggregate tok/s | per stream |
-|---|---|---|
-| 1 | 24.7 | 24.7 |
-| 4 | 73.0 | 18.3 |
-| 8 | 75 to 77 | 9.4 to 9.6 |
+| concurrent requests | tok/s | per stream | tok/step | tok/s with MTP off |
+|---|---|---|---|---|
+| 1 | 25.4 | 25.4 | 2.43 | 19.7 |
+| 4 | 61.5 | 15.4 | 2.30 | 54.3 |
+| 8 | 86.1 | 10.8 | 2.39 | 72.7 |
+
+MTP is worth 29 percent single-stream and 18 percent at 8 streams here. The
+last column is the same server with `--speculative-config` removed.
 
 Measure concurrency with long generations. A 256-token run at 8 streams
 returns anywhere from 54 to 105 tokens per second on an unchanged server.
 The first part of a generation runs faster than the steady state. A
-1024-token run settles at 75 to 77 and repeats. Single-stream and prefill
-are stable at any run length.
+512-token run repeats within 2 percent. Single-stream and prefill are stable
+at any run length.
 
 The CUDA graph capture sizes run up to 48 rather than the default 8. A
 decode batch wider than 8 then keeps its graph instead of falling back to
 eager.
 
-Decode slows with context depth, but not sharply. Single-stream decode runs
-at 24.7 tokens per second on a short prompt and 13.3 at 844,617 tokens.
+Prefill runs at 1,330 to 2,370 tokens per second, faster on longer prompts. A 204,819-token prompt
+takes 86 seconds. A cold 844,617-token prompt takes 601 seconds. Treat the
+full million as a load-once batch mode, not an interactive one. The prefix
+cache makes every later turn on the same context cheap. The same
+844,617-token context replays in 10 seconds.
 
-Prefill runs at 1,330 to 2,370 tokens per second, faster on longer prompts.
-A 204,819-token prompt takes 86 seconds. A cold 844,617-token prompt takes
-601 seconds. Treat the full million as a load-once batch mode, not an
-interactive one. The prefix cache makes every later turn on the same context
-cheap. The same 844,617-token context replays in 10 seconds.
+#### What MTP needs under pipeline parallel
 
-#### MTP speculative decoding does not work here yet
-
-MTP is worth a lot on this model. At 3 draft tokens it takes single-stream
-decode from 24.1 to about 43 tokens per second, and 8-stream from 73.7 to
-90.7. Draft acceptance is healthy at 79%, 57%, and 39% across the three
-draft positions, which is 2.76 tokens per model step.
-
-It is off because it crashes on any prompt long enough to need several
-prefill chunks. The failure is in vLLM, at
+MTP crashes on this profile without the second fix in `scheduler-pp-spec.py`.
+Any prompt long enough to need several prefill chunks trips an assertion in
 `vllm/v1/worker/gpu/model_runner.py`:
 
 ```
 assert (num_scheduled_tokens_np >= num_logits).all()
 ```
 
-The cause is the one
-[bayley/vllm-170hx-glm5](https://github.com/bayley/vllm-170hx-glm5)
-documents. Under pipeline parallel, several batches of one request are in
-flight at once. Leftover `spec_token_ids` from an older batch make the
-scheduler give the request more tokens than the step can hold. The crash
-reproduces from 32,000 tokens upward. It is not caused by async scheduling,
-by the prefill chunk budget, or by prefix caching.
+Under pipeline parallel, several batches of one request are in flight at
+once. Leftover `spec_token_ids` from an older batch make the scheduler give
+the request more tokens than the step can hold. The crash starts at about
+32,000 tokens of prompt.
 
-`scheduler-pp-spec-stale-drafts.py` ports bayley's stale-draft guard. It
-drops draft tokens that did not ride on the request's own latest verified
-token. That guard alone does not fix the crash. bayley also serializes a
-request against its own in-flight steps in the scheduler, and that part is
-not ported. Enable MTP with `--speculative-config` only for short prompts.
+The fix holds a request back until its own sampling step lands, which is the
+serialization that plain decoding gets for free. It gates on sampling steps
+only. A pure prefill chunk ships no sampled token and no draft, so those
+chunks still pipeline across the stages. Serializing them too costs 8 times
+on prefill.
 
-Before you port more of that work, note one detail. bayley identifies a
-settled request by `num_computed_tokens == num_tokens - 1`. This
-vllm-backport image counts the just-sampled token as computed, so a settled
-request here has `num_computed_tokens == num_tokens`. Ported verbatim, the
-guard matches nothing, drops every draft, and turns MTP off while still
-paying its cost. Single-stream then reads about 16 tokens per second,
-below the 24.7 of plain decoding.
+The guard identifies a settled request by `num_computed_tokens ==
+num_tokens`. bayley's original uses `num_tokens - 1`, because his vLLM does
+not count the just-sampled token as computed. Ported without that change,
+the guard matches nothing and drops every draft.
 
-[promisezackr/glm53-flash-170hx-pp8](https://github.com/promisezackr/glm53-flash-170hx-pp8)
-is the closer donor for that port. It runs the same `v1/worker/gpu/` layout
-as this image. Its patch 0007 replaces boolean-mask draft indexing with a
-Triton row-scatter, worth 2x single-stream. The mask path calls `nonzero()`,
-which forces a device sync on every non-last rank every step. Patch 0021
-adds adaptive per-request draft truncation. Patch 0022 removes it again.
+With both fixes the profile runs 24 copy-fidelity requests from 8,139 to
+124,652 tokens of context with no error and no engine death.
 
 ## Persisted JIT and compile caches
 
@@ -615,9 +622,12 @@ because all ten profiles share port 8098.
 - `run-qwen3-flash-next-awq-podman.sh` starts the Qwen3.8-Flash-Next `qwenawq`
   profile (AWQ W4A16 quantization).
 - `run-glm53-flash-podman.sh` starts the `glm53flash` profile
-  (GLM-5.3-Flash-AWQ-W4A16, 4 GPUs). Does not start on this hardware today.
-  (GLM-5.3-Flash-AWQ-W4A16, all 8 GPUs).
+  (GLM-5.3-Flash-AWQ-W4A16, 4 GPUs).
+- `run-glm53-flash-6gpu-podman.sh` starts the `glm53flash6gpu` profile
+  (GLM-5.3-Flash-AWQ-W4A16, 6 GPUs).
 - `run-glm53-int4-podman.sh` starts the `glm53int4` profile
   (GLM-5.3-AWQ-INT4, 4 GPUs). Does not start on this hardware today.
 - `run-glm53-int4-8gpu-podman.sh` starts the `glm53int48gpu` profile
   (GLM-5.3-AWQ-INT4, all 8 GPUs).
+- `run-glm53-mix-8gpu-podman.sh` starts the `glm53mix8gpu` profile
+  (GLM-5.3-Int4-Int8Mix, all 8 GPUs).

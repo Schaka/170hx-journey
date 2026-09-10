@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
 import itertools
 import time
 from collections import defaultdict, deque
@@ -305,6 +306,15 @@ class Scheduler(SchedulerInterface):
             self.connector.bind_gpu_block_pool(self.kv_cache_manager.block_pool)
 
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
+        # Serialize a request against its own in-flight sampling step under
+        # pipeline parallel with sync scheduling and speculative decoding.
+        # Set GLM53_PP_SPEC_SERIALIZE=0 to turn this off.
+        self._pp_spec_serialize = (
+            self.use_pp
+            and not self.scheduler_config.async_scheduling
+            and vllm_config.speculative_config is not None
+            and os.environ.get("GLM53_PP_SPEC_SERIALIZE", "1") == "1"
+        )
         self.use_v2_model_runner = vllm_config.use_v2_model_runner
         # Scheduler iteration counter. Drives the V2+PP+async decode-throttle
         # cadence (`next_decode_eligible_step`).
@@ -551,6 +561,27 @@ class Scheduler(SchedulerInterface):
             request = self.running[req_index]
             if input_budget <= draft_slots:
                 break
+
+            if (
+                self._pp_spec_serialize
+                and getattr(request, "_pp_spec_in_flight", False)
+                # Sampling steps only. A pure prefill chunk, whose computed
+                # cursor is still short of the prompt end, ships no sampled
+                # token and no draft, so it can pipeline across the pipeline
+                # stages the way stock chunked prefill does.
+                and request.num_computed_tokens >= request.num_prompt_tokens
+            ):
+                # 170hx-journey, from bayley/vllm-170hx-glm5 patch_mtp_pp.py:
+                # under pipeline parallel with sync scheduling and speculative
+                # decoding, this request's previous step is not processed yet
+                # and may have sampled. Leftover spec_token_ids would make
+                # num_new_tokens above zero and reschedule the request on stale
+                # drafts, while the newly sampled token lives only on the last
+                # rank. Non-last ranks would embed the draft, and their KV would
+                # diverge from the last rank's for good. This mirrors the
+                # num_new_tokens == 0 serialization that plain decoding gets.
+                req_index += 1
+                continue
 
             if (
                 request.num_output_placeholders > 0
@@ -1271,6 +1302,14 @@ class Scheduler(SchedulerInterface):
                 req_to_new_blocks,
             )
 
+        # Mark scheduled requests in flight. update_from_output clears the
+        # flag once the step's output is processed.
+        if self._pp_spec_serialize:
+            for _rid in num_scheduled_tokens:
+                _r = self.requests.get(_rid)
+                if _r is not None:
+                    _r._pp_spec_in_flight = True
+
         # Record the request ids that were scheduled in this step (MRV1-only).
         if not self.use_v2_model_runner:
             self.prev_step_scheduled_req_ids.clear()
@@ -1880,6 +1919,9 @@ class Scheduler(SchedulerInterface):
                 continue
 
             req_index = model_runner_output.req_id_to_index[req_id]
+            # This request's step output is being processed now, so the
+            # scheduler can schedule the request again.
+            request._pp_spec_in_flight = False
             generated_token_ids = (
                 sampled_token_ids[req_index] if sampled_token_ids else []
             )
