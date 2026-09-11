@@ -1038,6 +1038,29 @@ This is the same fix as patch `0023` in the
 [fork](https://github.com/Schaka/deepseek-v4-cmp170hx), written for this
 codebase.
 
+### A minimum number of tokens holds the thinking block open
+
+The V4.1 generation prompt ends with the `<think>` token, so every turn starts
+inside the thinking block. The checkpoint can close that block with its first
+generated token. The reasoning block is then empty. The model writes its
+deliberation into `content` instead. The real `</think>` at the end of that
+deliberation reaches the parser in its content state, where the parser absorbs
+it without an event. The client shows the thinking as chat text, and it writes
+that text back into the next turn.
+
+The parser cannot repair this. It already streamed the text as content, so it
+cannot relabel it. The fix belongs at sampling time.
+
+`patches/vllm-backport-v41/min_thinking_tokens.py` masks the `</think>` token
+until the request reaches `VLLM_MIN_THINKING_TOKENS` output tokens. The
+`dsv416pp` profile mounts it and sets 32. It tracks only a request whose
+prompt ends inside a thinking block, so a request that asks for no thinking is
+untouched.
+
+The module subclasses `MinTokensLogitsProcessor`. The rejection sampler
+applies only that class under speculative decoding. A plain `LogitsProcessor`
+runs in the normal sampler and stops running the moment DSpark is on.
+
 ### The parser recovers a tool call that opens inside the thinking block
 
 When a request omits the `thinking` flag, the model means thinking. The
