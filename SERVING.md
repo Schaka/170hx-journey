@@ -1051,15 +1051,19 @@ that text back into the next turn.
 The parser cannot repair this. It already streamed the text as content, so it
 cannot relabel it. The fix belongs at sampling time.
 
-`patches/vllm-backport-v41/min_thinking_tokens.py` masks the `</think>` token
-until the request reaches `VLLM_MIN_THINKING_TOKENS` output tokens. The
-`dsv416pp` profile mounts it and sets 32. It tracks only a request whose
-prompt ends inside a thinking block, so a request that asks for no thinking is
-untouched.
+The build kit adds a floor to the thinking-token budget in
+`vllm/v1/worker/gpu/sample/thinking_budget.py`. That kernel already finds the
+last `<think>` and counts the tokens after it, for the opposite purpose. Above
+the budget it forces the end marker. Below the floor it forbids the same
+token, so the block cannot close yet. `VLLM_MIN_THINKING_TOKENS` sets the
+floor, and the `dsv416pp` profile sets 32. A request whose prompt is not
+inside a thinking block never reaches the check. A request that sends
+`thinking: false` therefore still returns no reasoning.
 
-The module subclasses `MinTokensLogitsProcessor`. The rejection sampler
-applies only that class under speculative decoding. A plain `LogitsProcessor`
-runs in the normal sampler and stops running the moment DSpark is on.
+The floor must live in this kernel. vLLM also accepts a custom logits
+processor through `--logits-processors`. That flag selects Model Runner V1.
+V1 then refuses to start with `Model Runner V1 does not support: dspark
+speculative decoding`.
 
 ### The parser recovers a tool call that opens inside the thinking block
 
