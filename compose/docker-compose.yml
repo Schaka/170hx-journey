@@ -686,6 +686,18 @@ services:
       - '{"method":"dspark","num_speculative_tokens":${DSV416_SPEC_K:-5}}'
       - --kernel-config
       - '{"enable_jit_warmup": false}'
+      - --reasoning-parser
+      - deepseek_v41
+      - --enable-auto-tool-choice
+      - --tool-call-parser
+      - deepseek_v41
+      # Without these the thinking block stays inside `content`, and an agent
+      # client writes it back into the next turn.
+      - --reasoning-parser
+      - deepseek_v41
+      - --enable-auto-tool-choice
+      - --tool-call-parser
+      - deepseek_v41
 
   qwen8gpu:
     image: ${QWEN_IMAGE:-docker.io/lazymio/vllm-backport:latest-sm80}

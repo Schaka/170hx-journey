@@ -768,6 +768,43 @@ Read any single decode number against the prompt that produced it. The
 synthetic filler in the concurrency benchmark is high-entropy text, which is
 the worst case for a speculator.
 
+### Reasoning output for an agent client
+
+Both V4.1 profiles set three parser flags:
+
+```
+--reasoning-parser deepseek_v41
+--enable-auto-tool-choice
+--tool-call-parser deepseek_v41
+```
+
+Without the reasoning parser, the thinking block stays inside the `content`
+field. An agent client then writes that text back into the next turn. Over a
+long session the model reads its own thinking as conversation and drifts into
+a repetition loop.
+
+The parser alone is not enough. vLLM names the field `reasoning`. The DeepSeek
+API and most other providers name it `reasoning_content`, and that is the name
+agent clients look for, opencode included. The build kit adds the second name
+as an alias at both places that serialize a message:
+
+- `vllm/entrypoints/openai/chat_completion/protocol.py`, for the complete
+  message of a request that does not stream.
+- `vllm/entrypoints/openai/engine/protocol.py`, for every streamed delta. A
+  client that reads each chunk needs the name there too.
+
+Both names carry the same text, so a client that reads either one works. The
+six-card profile answers with both:
+
+```
+fields: ['annotations', 'audio', 'content', 'function_call', 'reasoning',
+         'reasoning_content', 'refusal', 'role']
+```
+
+```
+"delta":{"reasoning":"We","reasoning_content":"We"}
+```
+
 ### dsv416: the same model on 6 GPUs
 
 The `dsv416` profile serves DeepSeek-V4.1-Flash on GPUs 0 to 5, with
@@ -842,6 +879,23 @@ in `chat_template_kwargs` on every request. V4.1 reads a numeric budget from
 1 to 100, where `low` is 25, `high` is 50, `xhigh` is 75 and `max` is 100.
 Without a value the model uses 50 and can drift into a repetition loop on
 long context.
+
+### Reasoning reaches the client under both field names
+
+Both profiles set `--reasoning-parser deepseek_v41`, `--tool-call-parser
+deepseek_v41` and `--enable-auto-tool-choice`. Without the reasoning parser
+the thinking block stays inside `content`. An agent client then writes that
+text back into the next turn, and the model drifts into a repetition loop.
+
+The build kit adds one more edit for the same problem. vLLM names the
+reasoning field `reasoning`. The DeepSeek API and most other providers name
+it `reasoning_content`, and that is the name agent clients look for, opencode
+included. The kit emits both names, in the complete message and in every
+streamed delta. A client that reads either one works.
+
+This is the same fix as patch `0023` in the
+[fork](https://github.com/Schaka/deepseek-v4-cmp170hx), written for this
+codebase.
 
 ### The profile does not set `--max-num-batched-tokens`
 

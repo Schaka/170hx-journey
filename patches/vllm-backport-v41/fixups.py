@@ -1115,3 +1115,31 @@ sub(_M41,
             for _relay in self.kv_group_relays:
                 _relay.write(""")
 print("candidate relay done")
+
+# --- emit reasoning under both field names --------------------------------
+# vLLM names the reasoning field `reasoning`. DeepSeek's own API and most
+# other providers name it `reasoning_content`, and that is the name agent
+# clients look for, opencode included. A client that finds neither treats the
+# whole thinking block as assistant content, writes it back into the next
+# turn, and the model then drifts into a repetition loop. Emit both names.
+_ALIAS_OLD = """    @model_serializer(mode="wrap")
+    def _serialize(self, handler):
+        data = handler(self)
+        if len(data.get("tool_calls", [])) == 0:
+            data.pop("tool_calls", None)
+        return data"""
+_ALIAS_NEW = """    @model_serializer(mode="wrap")
+    def _serialize(self, handler):
+        data = handler(self)
+        if len(data.get("tool_calls", [])) == 0:
+            data.pop("tool_calls", None)
+        if data.get("reasoning") is not None:
+            # Alias, not a move. A client that reads either name works.
+            data["reasoning_content"] = data["reasoning"]
+        return data"""
+
+# The complete message, for a request that does not stream.
+sub("vllm/entrypoints/openai/chat_completion/protocol.py", _ALIAS_OLD, _ALIAS_NEW)
+# Every streamed delta. A client that checks each chunk needs it here too.
+sub("vllm/entrypoints/openai/engine/protocol.py", _ALIAS_OLD, _ALIAS_NEW)
+print("reasoning_content alias done")
