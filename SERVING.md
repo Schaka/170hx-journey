@@ -964,6 +964,16 @@ buffer each stage refills.
 The profile recalls a fact planted at 15 percent and at 75 percent depth in
 prompts of 25,073, 103,073, 259,073 and 649,073 tokens. All eight runs pass.
 
+#### Long context costs prefill, not decode
+
+Decode on a cached prompt of 259,079 tokens runs at 46.7 tokens per second.
+That matches the rate at 2,000 tokens. The indexer scores the whole context
+at layers 24, 28, 32 and 36 on every step. That work does not show in the
+decode time on this hardware.
+
+Prefill is where length costs. The profile prefills 119,027 tokens at 5,078
+tokens per second and 779,069 tokens at 2,917 tokens per second.
+
 ### dsv418: one pipeline stage per card
 
 The `dsv418` profile serves DeepSeek-V4.1-Flash on all 8 GPUs with
