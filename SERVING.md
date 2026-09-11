@@ -1057,8 +1057,30 @@ model can drop the space in the wrapper and write `<｜DSML｜calls>`. The kit
 accepts that spelling as the wrapper. The lexer matches the longest literal
 first, so the correct wrapper behaves the same as before.
 
-These are the same fixes as patches `0016` and `0018` in the fork, written for
-this codebase.
+The third path handles a lost special token. `｜DSML｜` is one token in the
+vocabulary. The model can drop it and write the markers in plain text, and it
+can mix the two spellings inside one call. This is a real example:
+
+```
+<tool_calls><invoke name="Bash"><parameter name="command">pwd</｜DSML｜ parameter></｜DSML｜ invoke></｜DSML｜ calls>
+```
+
+The kit adds `<invoke name="`, `</invoke>` and `</tool_calls>` as markers. The
+parser starts the call from the plain invoke marker. It closes the call on
+either spelling. It accepts only a tool name the request declares. The
+parameter patterns now read either spelling on each side of a value, and the
+`string="true"` attribute is optional. A value that carries no attribute
+parses as JSON first, then as plain text.
+
+The kit does not add a plain `<tool_calls>` wrapper marker. A bare wrapper
+carries no tool name to check. Text that talks about the protocol can then
+consume the rest of the message.
+
+Without the third path the whole call reaches the client as text, and the
+thinking block never closes.
+
+The first two paths are the same fixes as patches `0016` and `0018` in the
+fork, written for this codebase.
 
 ### The profile does not set `--max-num-batched-tokens`
 

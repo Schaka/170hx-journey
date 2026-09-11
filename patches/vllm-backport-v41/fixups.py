@@ -1302,3 +1302,178 @@ sub("vllm/parser/deepseek_v41.py",
         "INVOKE_PREFIX": DSML_INVOKE_PREFIX,
 """)
 print("parser reasoning-state recovery and lenient envelope done")
+
+# --- parser: accept a plain-ASCII tool-call envelope -----------------------
+# `｜DSML｜` is one vocab token. The checkpoint sometimes drops it and writes
+# `<invoke name="...">` in plain text, and it mixes the two spellings inside
+# one call: an ASCII opener with a `</｜DSML｜ invoke>` close. The ASCII
+# opener matches no terminal, so the parser never enters tool mode and the
+# whole call leaks as text, which also leaves the thinking block open.
+#
+# Only the invoke marker gets a CONTENT and REASONING entry, and both
+# validate the tool name against the request. An ASCII `<tool_calls>` wrapper
+# stays plain text on purpose: a bare wrapper carries no name to check, and
+# prose that talks about the protocol would then eat the rest of the message.
+sub(_PARSER,
+    """DSML_TOOL_END_LENIENT = f"</{_DSML}_tool_calls>"
+""",
+    """DSML_TOOL_END_LENIENT = f"</{_DSML}_tool_calls>"
+# The same markers with the special token dropped. The checkpoint mixes
+# these with the real spelling inside one call.
+DSML_INVOKE_PREFIX_ASCII = '<invoke name="'
+DSML_INVOKE_END_ASCII = "</invoke>"
+DSML_TOOL_END_ASCII = "</tool_calls>"
+""")
+
+sub(_PARSER,
+    """            "TOOL_START_LENIENT": DSML_TOOL_START_LENIENT,
+            "TOOL_END_LENIENT": DSML_TOOL_END_LENIENT,
+""",
+    """            "TOOL_START_LENIENT": DSML_TOOL_START_LENIENT,
+            "TOOL_END_LENIENT": DSML_TOOL_END_LENIENT,
+            "INVOKE_PREFIX_ASCII": DSML_INVOKE_PREFIX_ASCII,
+            "INVOKE_END_ASCII": DSML_INVOKE_END_ASCII,
+            "TOOL_END_ASCII": DSML_TOOL_END_ASCII,
+""")
+
+sub(_PARSER,
+    """            (ParserState.REASONING, "FOREIGN_START"): Transition(
+                ParserState.FOREIGN_BLOCK,
+                (EventType.REASONING_END, EventType.TEXT_CHUNK),
+            ),
+""",
+    """            (ParserState.REASONING, "FOREIGN_START"): Transition(
+                ParserState.FOREIGN_BLOCK,
+                (EventType.REASONING_END, EventType.TEXT_CHUNK),
+            ),
+            # The same two recoveries for the plain-ASCII invoke marker.
+            (ParserState.CONTENT, "INVOKE_PREFIX_ASCII"): Transition(
+                ParserState.TOOL_NAME,
+                (EventType.TOOL_CALL_START,),
+                validate_tool_name=True,
+            ),
+            (ParserState.REASONING, "INVOKE_PREFIX_ASCII"): Transition(
+                ParserState.TOOL_NAME,
+                (EventType.REASONING_END, EventType.TOOL_CALL_START),
+                validate_tool_name=True,
+            ),
+""")
+
+sub(_PARSER,
+    """            (ParserState.TOOL_PREAMBLE, "INVOKE_PREFIX"): Transition(
+                ParserState.TOOL_NAME,
+                (EventType.TOOL_CALL_START,),
+            ),
+""",
+    """            (ParserState.TOOL_PREAMBLE, "INVOKE_PREFIX"): Transition(
+                ParserState.TOOL_NAME,
+                (EventType.TOOL_CALL_START,),
+            ),
+            (ParserState.TOOL_PREAMBLE, "INVOKE_PREFIX_ASCII"): Transition(
+                ParserState.TOOL_NAME,
+                (EventType.TOOL_CALL_START,),
+            ),
+""")
+
+sub(_PARSER,
+    """            (ParserState.TOOL_ARGS, "TOOL_END_LENIENT"): Transition(
+                ParserState.CONTENT,
+                (EventType.TOOL_CALL_END,),
+            ),
+""",
+    """            (ParserState.TOOL_ARGS, "TOOL_END_LENIENT"): Transition(
+                ParserState.CONTENT,
+                (EventType.TOOL_CALL_END,),
+            ),
+            (ParserState.TOOL_ARGS, "INVOKE_END_ASCII"): Transition(
+                ParserState.TOOL_BETWEEN,
+                (EventType.TOOL_CALL_END,),
+            ),
+            (ParserState.TOOL_ARGS, "TOOL_END_ASCII"): Transition(
+                ParserState.CONTENT,
+                (EventType.TOOL_CALL_END,),
+            ),
+""")
+
+sub(_PARSER,
+    """            (ParserState.TOOL_BETWEEN, "TOOL_END_LENIENT"): Transition(
+                ParserState.CONTENT,
+                (),
+            ),
+""",
+    """            (ParserState.TOOL_BETWEEN, "TOOL_END_LENIENT"): Transition(
+                ParserState.CONTENT,
+                (),
+            ),
+            (ParserState.TOOL_BETWEEN, "INVOKE_PREFIX_ASCII"): Transition(
+                ParserState.TOOL_NAME,
+                (EventType.TOOL_CALL_START,),
+            ),
+            (ParserState.TOOL_BETWEEN, "TOOL_END_ASCII"): Transition(
+                ParserState.CONTENT,
+                (),
+            ),
+""")
+
+# The parameter markers need the same tolerance, and the ASCII spelling also
+# drops the `string=` attribute. Each side of a parameter is matched on its
+# own, because the checkpoint opens in one spelling and closes in the other.
+sub(_PARSER,
+    """_ESCAPED_DSML = re.escape(_DSML)
+_PARAM_RE = re.compile(
+    rf'<{_ESCAPED_DSML}parameter\\s+name="([^"]+)"\\s+string="(true|false)">'
+    rf"(.*?)</{_ESCAPED_DSML}parameter>",
+    re.DOTALL,
+)
+_PARTIAL_PARAM_RE = re.compile(
+    rf'<{_ESCAPED_DSML}parameter\\s+name="([^"]+)"\\s+string="(true|false)">'
+    rf"(.*)$",
+    re.DOTALL,
+)
+""",
+    """_ESCAPED_DSML = re.escape(_DSML)
+_PARAM_OPEN = (
+    rf'<(?:{_ESCAPED_DSML})?parameter\\s+name="([^"]+)"'
+    rf'(?:\\s+string="(true|false)")?>'
+)
+_PARAM_SHUT = rf"</(?:{_ESCAPED_DSML})?parameter>"
+_PARAM_RE = re.compile(
+    _PARAM_OPEN + r"(.*?)" + _PARAM_SHUT,
+    re.DOTALL,
+)
+_PARTIAL_PARAM_RE = re.compile(
+    _PARAM_OPEN + r"(.*)$",
+    re.DOTALL,
+)
+""")
+
+# V4.1 spaces its own markers, so it carries its own pair of patterns.
+sub("vllm/parser/deepseek_v41.py",
+    """_PARAM_RE = re.compile(
+    r'<｜DSML｜ parameter\\s+name="([^"]+)"\\s+string="(true|false)">'
+    r"(.*?)"
+    r"(?:</｜DSML｜ parameter>|(?=<｜DSML｜ parameter\\s+name=))",
+    re.DOTALL,
+)
+_PARTIAL_PARAM_RE = re.compile(
+    r'<｜DSML｜ parameter\\s+name="([^"]+)"\\s+string="(true|false)">'
+    r"(.*)$",
+    re.DOTALL,
+)
+""",
+    """_PARAM_OPEN = (
+    r'<(?:｜DSML｜\\s*)?parameter\\s+name="([^"]+)"'
+    r'(?:\\s+string="(true|false)")?>'
+)
+_PARAM_SHUT = r"</(?:｜DSML｜\\s*)?parameter>"
+_PARAM_NEXT = r'(?=<(?:｜DSML｜\\s*)?parameter\\s+name=)'
+_PARAM_RE = re.compile(
+    _PARAM_OPEN + r"(.*?)" + r"(?:" + _PARAM_SHUT + r"|" + _PARAM_NEXT + r")",
+    re.DOTALL,
+)
+_PARTIAL_PARAM_RE = re.compile(
+    _PARAM_OPEN + r"(.*)$",
+    re.DOTALL,
+)
+""")
+print("parser plain-ASCII envelope done")
