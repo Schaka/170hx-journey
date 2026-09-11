@@ -898,6 +898,7 @@ sub(_M41,
         # fills it. A stage that never fills it still keeps the pipeline
         # payload the same shape on both sides of the hop.
         self._relay_latent_buffer: torch.Tensor | None = None
+        self._relays_forward_latent = False
         if get_pp_group().world_size > 1 and not get_pp_group().is_last_rank:
             # Zeroed, not empty. A step where the source produces no latent
             # leaves these rows untouched, and the receiving stage still
@@ -918,6 +919,11 @@ sub(_M41,
                 _local_sources[-1].attn._relay_latent_buffer = (
                     self._relay_latent_buffer
                 )
+            else:
+                # This stage writes no kv source at all, so the group that
+                # straddles it starts further back. Pass on what arrives, or
+                # the next stage reads a buffer of zeros.
+                self._relays_forward_latent = True
 
         # The n-gram hash needs a slot-keyed rolling store of compressed ids""")
 
@@ -972,6 +978,11 @@ sub(_M41,
                 _relay.write(
                     intermediate_tensors["kv_latent"][: positions.shape[0]],
                     positions,
+                )
+            if self._relays_forward_latent:
+                _n = positions.shape[0]
+                self._relay_latent_buffer[:_n].copy_(
+                    intermediate_tensors["kv_latent"][:_n]
                 )""")
 
 # 7. Let the shadow weights load under their source-layer checkpoint names.

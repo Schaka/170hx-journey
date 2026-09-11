@@ -618,6 +618,13 @@ services:
       # The sm_80 build has no compiled kernel for the warm-up path.
       - --kernel-config
       - '{"enable_jit_warmup": false}'
+      # Without these the thinking block stays inside `content`, and an agent
+      # client writes it back into the next turn.
+      - --reasoning-parser
+      - deepseek_v41
+      - --enable-auto-tool-choice
+      - --tool-call-parser
+      - deepseek_v41
 
   dsv416:
     image: ${DSV416_IMAGE:-localhost/vllm-backport-v41:sm80-6card}
@@ -686,11 +693,75 @@ services:
       - '{"method":"dspark","num_speculative_tokens":${DSV416_SPEC_K:-5}}'
       - --kernel-config
       - '{"enable_jit_warmup": false}'
+      # Without these the thinking block stays inside `content`, and an agent
+      # client writes it back into the next turn.
       - --reasoning-parser
       - deepseek_v41
       - --enable-auto-tool-choice
       - --tool-call-parser
       - deepseek_v41
+
+  dsv418:
+    image: ${DSV418_IMAGE:-localhost/vllm-backport-v41:sm80}
+    container_name: deepseek-v41-flash-pp8
+    profiles: ["dsv418"]
+    devices:
+      - nvidia.com/gpu=all
+    shm_size: "16g"
+    ports:
+      - "8098:8000"
+    environment:
+      NCCL_ALGO: "Ring"
+      NCCL_PROTO: "Simple"
+      PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
+      OMP_NUM_THREADS: "1"
+      # One stage per card, 5 layers each. Six of the seven cuts fall inside
+      # a kv-sharing group, so six stages run a relay. Three of them hold no
+      # kv source of their own and pass the latent straight through.
+      VLLM_PP_LAYER_PARTITION: "${DSV418_PARTITION:-5,5,5,5,5,5,5,5}"
+    volumes:
+      - ${DSV41_MODEL:-/models/DeepSeek-V4.1-Flash}:/model
+      - ${HOME}/cache/dsv418/vllm:/root/.cache/vllm
+      - ${HOME}/cache/dsv418/flashinfer:/root/.cache/flashinfer
+      - ${HOME}/cache/dsv418/triton:/root/.triton
+      - ${HOME}/cache/dsv418/nv:/root/.nv
+      - ${HOME}/cache/dsv418/humming:/root/.humming
+      - ${HOME}/cache/dsv418/cupy:/root/.cupy
+      - ${HOME}/cache/dsv418/tilelang:/root/.tilelang
+    command:
+      - /model
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --served-model-name
+      - deepseek-v4.1-flash
+      # No tensor parallel at all. Every all-reduce this box runs crosses a
+      # Gen2 x4 link, so the pipeline hop carries the hidden states alone.
+      - --tensor-parallel-size
+      - "1"
+      - --pipeline-parallel-size
+      - "8"
+      - --attention-backend
+      - TRITON_MLA_SPARSE_DSV41
+      - --kv-cache-dtype
+      - fp8_ds_mla
+      - --block-size
+      - "${DSV418_BLOCK:-128}"
+      - --dtype
+      - bfloat16
+      - --max-model-len
+      - "${DSV418_MAXLEN:-1048576}"
+      - --gpu-memory-utilization
+      - "${DSV418_UTIL:-0.95}"
+      - --max-num-seqs
+      - "8"
+      - --enable-prefix-caching
+      - --enable-prompt-tokens-details
+      - --speculative-config
+      - '{"method":"dspark","num_speculative_tokens":${DSV418_SPEC_K:-5}}'
+      - --kernel-config
+      - '{"enable_jit_warmup": false}'
       # Without these the thinking block stays inside `content`, and an agent
       # client writes it back into the next turn.
       - --reasoning-parser

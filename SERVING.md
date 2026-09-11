@@ -880,9 +880,52 @@ in `chat_template_kwargs` on every request. V4.1 reads a numeric budget from
 Without a value the model uses 50 and can drift into a repetition loop on
 long context.
 
+### dsv418: one pipeline stage per card
+
+The `dsv418` profile serves DeepSeek-V4.1-Flash on all 8 GPUs with
+tensor-parallel-size 1 and pipeline-parallel-size 8. It carries no measured
+numbers yet.
+
+The profile exists to test one claim. Every all-reduce on this box crosses a
+Gen2 x4 link. At tensor-parallel-size 4 each layer moves about 16 MB per
+2,048-token chunk over a 1.6 GB/s link. That is about 15 ms per all-reduce
+and about 1.2 s per chunk. It works out near 1,700 tokens per second. The
+`dsv41` profile measures that prefill. Prefill on that profile is
+therefore bound by the link and not by the cards. A pipeline stage per card
+removes the all-reduce and sends the hidden states alone.
+
+The cost is the key-value pool. Tensor parallel splits the compressed cache
+across the cards of a stage, and a pure pipeline does not. The pool will land
+near the 6-GPU figure rather than the 8-GPU one.
+
+`VLLM_PP_LAYER_PARTITION` is `5,5,5,5,5,5,5,5`. Only the cut at layer 20
+falls on a kv-sharing group boundary. The other six cuts fall inside a group,
+so six stages run a relay:
+
+| stage | layers | reads a group written on | relay |
+|---|---|---|---|
+| 0 | 0 to 4 | itself | none |
+| 1 | 5 to 9 | layer 2 | rebuilds from the hop |
+| 2 | 10 to 14 | layer 8 | rebuilds from the hop |
+| 3 | 15 to 19 | layer 14 | rebuilds from the hop |
+| 4 | 20 to 24 | itself | none |
+| 5 | 25 to 29 | layer 20 | rebuilds and passes on |
+| 6 | 30 to 34 | layer 20 | rebuilds and passes on |
+| 7 | 35 to 39 | layer 20 | rebuilds from the hop |
+
+Stages 5 and 6 write no kv source of their own. The hop carries one latent
+slot, filled by the last kv source on the sending stage. A stage with no kv
+source copies the latent it receives into that slot and sends it on. The
+candidate blocks chain the same way, through the buffer each stage refills.
+
+The last stage carries the head, the DSpark drafter and the extra embedding
+table, about 5.1 GiB on top of its 5 layers. If it reports `ValueError: No
+available memory for the cache blocks`, set
+`DSV418_PARTITION=6,5,5,5,5,5,5,4` to move a layer off it.
+
 ### Reasoning reaches the client under both field names
 
-Both profiles set `--reasoning-parser deepseek_v41`, `--tool-call-parser
+Every V4.1 profile sets `--reasoning-parser deepseek_v41`, `--tool-call-parser
 deepseek_v41` and `--enable-auto-tool-choice`. Without the reasoning parser
 the thinking block stays inside `content`. An agent client then writes that
 text back into the next turn, and the model drifts into a repetition loop.
@@ -981,3 +1024,5 @@ because all twelve profiles share port 8098.
   (DeepSeek-V4.1-Flash, all 8 GPUs).
 - `run-dsv41-6gpu-podman.sh` starts the `dsv416` profile
   (DeepSeek-V4.1-Flash, 6 GPUs).
+- `run-dsv41-pp8-podman.sh` starts the `dsv418` profile
+  (DeepSeek-V4.1-Flash, all 8 GPUs, one pipeline stage per card).
