@@ -770,6 +770,10 @@ services:
       - '{"method":"dspark","num_speculative_tokens":${DSV416PP_SPEC_K:-5}}'
       - --kernel-config
       - '{"enable_jit_warmup": false}'
+      # The Engram tables live in pinned host memory and the GPU reads them
+      # over the PCIe link. That returns their VRAM to the key-value cache.
+      - --engram-config
+      - '{"cpu_offload": ${DSV416PP_ENGRAM_CPU:-true}}'
       # Without these the thinking block stays inside `content`, and an agent
       # client writes it back into the next turn.
       - --reasoning-parser

@@ -668,24 +668,25 @@ billion parameters that the runtime keeps in host memory.
 
 ### The image
 
-No public image runs this model on sm_80. The build kit in
-[patches/vllm-backport-v41/](patches/vllm-backport-v41/) makes one.
-[`build.sh`](patches/vllm-backport-v41/build.sh) does five steps:
+The `lazymio/vllm-backport:v0.13.0-sm80` image carries the V4.1 model, the
+Ampere sparse-MLA backend and the software fp8 helpers that sm_80 needs. It
+refuses a pipeline cut inside a kv-sharing group, so it serves this model on
+8 GPUs only. The build kit in
+[patches/vllm-backport-v41/](patches/vllm-backport-v41/) adds what the 6-card
+profiles need. [`build.sh`](patches/vllm-backport-v41/build.sh) does four
+steps:
 
-1. Copy the `vllm` tree out of the `lazymio/vllm-backport:v0.12.0-sm80` image.
-2. Apply the vLLM pull request 56201 diff with `git apply --reject`.
-3. Run [`fixups.py`](patches/vllm-backport-v41/fixups.py), which repairs every
-   hunk the backport tree rejects, and adds the sm_80 changes below.
-4. Copy the three files in [`ampere/`](patches/vllm-backport-v41/ampere/) into
-   the tree.
-5. Build the image as `localhost/vllm-backport-v41:sm80`.
+1. Copy the `vllm` tree out of the `lazymio/vllm-backport:v0.13.0-sm80` image.
+2. Run [`fixups.py`](patches/vllm-backport-v41/fixups.py), which makes the
+   three changes below.
+3. Copy [`pp_kv_group_relay.py`](patches/vllm-backport-v41/pp_kv_group_relay.py)
+   into the tree.
+4. Build the image as `localhost/vllm-backport-v41:sm80`.
 
-The kit needs a vLLM checkout with the pull request fetched:
+The kit needs podman and nothing else:
 
 ```bash
-git clone --filter=blob:none https://github.com/vllm-project/vllm.git
-cd vllm && git fetch https://github.com/vllm-project/vllm.git pull/56201/head:pr56201
-cd ~/v41kit && VLLM_SRC=~/vllm bash build.sh
+cd ~/v41kit && bash build.sh
 ```
 
 Every edit in `fixups.py` finds its place by a text anchor and runs twice with
@@ -713,31 +714,34 @@ GPUs 0 to 3 and group 1 on GPUs 4 to 7. Every all-reduce stays inside one
 switch. Only the pipeline hand-off crosses between switches, and that is one
 hidden-state tensor per micro-batch.
 
-### The sm_80 gaps the kit closes
+### What the kit adds
 
-- Triton types a kernel parameter from the tensor dtype and rejects `fp8e4nv`
-  below SM89. The kit keeps those buffers as `torch.uint8` and converts in
-  software through `vllm/v1/attention/ops/fp8_sm80.py`.
-- `dequantize_and_gather_k_cache` picks its path with `has_cutedsl()`, which
-  only asks whether the package is installed. The CuteDSL kernels need SM90,
-  so sm_80 takes that path and the compiler aborts. The kit swaps in
-  `is_cutedsl_supported()`, which also tests the compute capability.
-- The compiled `_C` operator
-  `fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert` carries the V4.0
-  signature and takes 9 arguments. V4.1 passes a tenth, `apply_q_norm`.
-  Dropping it normalizes Q twice and gives wrong output with no error.
-  [`qnorm_rope_kv_insert.py`](patches/vllm-backport-v41/ampere/qnorm_rope_kv_insert.py)
-  replaces the operator with a Triton kernel that takes the flag.
-- Marlin packs 4 fp8 values into one int32, so the `wo_a` weight arrives with
-  the wrong shape. The kit routes that one layer to the emulation kernel.
-- The key-value cache grouping code asserts a `[MLA, *SWA]` layer order and
-  drops the 3 compressor circular buffers. The kit gives those buffers their
-  own group and appends it after the arithmetic.
+- A pipeline cut inside a kv-sharing group. The base image raises
+  `NotImplementedError` and pins the last 20 layers to one stage. The relay
+  below lifts that.
 - Under pipeline parallel the DSpark drafter runs on the last stage and owns
   no embedding table. It aliases the target table, which the target only
-  builds on the first stage. When a DSpark drafter is
-  configured, the kit builds that table on the last stage as well. The weight loader keys off the
+  builds on the first stage. When a DSpark drafter is configured, the kit
+  builds that table on the last stage as well. The weight loader keys off the
   parameter existing, so the weights arrive by themselves.
+- The DSpark drafter reads the attention inputs of layers 37 to 39. The model
+  returns them on the last stage alone, so the runner refuses the whole
+  configuration with `ValueError: DeepseekV41ForCausalLM does not support
+  dspark with pipeline parallelism`. The kit packs those states into the
+  pipeline payload and reads them back, which is what the V4.0 model does.
+- The mixture-of-experts gate routes on the raw token ids at every layer, and
+  the model declares that need. The runner still clears the ids on every stage
+  after the first, and the gate then raises `ValueError: DeepSeek V4 vision
+  MoE routing requires input_ids`. The kit keeps the ids where the model asks
+  for them, in the step path and in the graph capture path.
+- The cache allocator looks up a group for every layer with a bare `next()`.
+  A group whose layers all sit on another stage raises `StopIteration`. The
+  kit skips such a group, because this stage has no layer to map it to.
+- The chat API emits reasoning text under the name `reasoning` only. The kit
+  emits `reasoning_content` beside it.
+- The parser recovers a tool call that lost its envelope from the content
+  state only. The kit adds the same recovery from the reasoning state, and a
+  near-miss envelope spelling.
 
 ### Speculative decoding with DSpark
 
@@ -855,7 +859,7 @@ things that every later layer in the group reads:
 - the indexer key cache,
 - the candidate blocks that every later indexer masks its scores against.
 
-[`pp_kv_group_relay.py`](patches/vllm-backport-v41/ampere/pp_kv_group_relay.py)
+[`pp_kv_group_relay.py`](patches/vllm-backport-v41/pp_kv_group_relay.py)
 gives the third stage its own copy of both caches and refills them each step.
 The payload is the compressor latent, `[num_tokens, 512]` in bfloat16. Both
 cache writes are pure functions of that latent, the token positions, the
@@ -910,12 +914,12 @@ fast as `dsv41`, and it decodes faster at every stream count.
 |---|---|---|---|
 | GPUs | 6 | 6 | 8 |
 | layout | TP1 x PP6 | TP2 x PP3 | TP4 x PP2 |
-| decode, 1 stream | 46.6 tok/s | 43.3 tok/s | 43.8 tok/s |
-| decode, 4 streams | 106.6 tok/s | 85.5 tok/s | 72.9 tok/s |
-| decode, 8 streams | 153.1 tok/s | not measured | 104.2 tok/s |
-| prefill, 119,027 tokens | 5,078 tok/s | 2,551 tok/s | 1,650 tok/s |
-| key-value pool | 2,196,629 tokens | 3,049,911 tokens | 14,058,003 tokens |
-| concurrency at 1,048,576 tokens | 2.09x | 2.91x | 13.41x |
+| decode, 1 stream | 44.4 tok/s | 43.3 tok/s | 43.8 tok/s |
+| decode, 4 streams | 108.8 tok/s | 85.5 tok/s | 72.9 tok/s |
+| decode, 8 streams | 163.4 tok/s | not measured | 104.2 tok/s |
+| prefill, 118,225 tokens | 5,078 tok/s | 2,551 tok/s | 1,650 tok/s |
+| key-value pool | 2,889,688 tokens | 3,049,911 tokens | 14,058,003 tokens |
+| concurrency at 1,048,576 tokens | 2.76x | 2.91x | 13.41x |
 
 Prefill gains because the profile runs no all-reduce at all. Every all-reduce
 on this box crosses a Gen2 x4 link at about 1.6 GB/s. At tensor-parallel-size
@@ -923,8 +927,7 @@ on this box crosses a Gen2 x4 link at about 1.6 GB/s. At tensor-parallel-size
 near 1,700 tokens per second. The pipeline hop carries the hidden states and
 the relay payload alone, which is far less traffic.
 
-The profile also prefills 39,027 tokens at 4,928 tokens per second and
-319,027 tokens at 4,209 tokens per second.
+The profile also prefills 239,025 tokens at 4,786 tokens per second.
 
 #### The layer partition
 
@@ -938,6 +941,14 @@ engine then reports:
 ```
 ValueError: To serve at least one request with the model's max seq len
 ```
+
+#### Engram stays in host memory
+
+The Engram tables hold 196 billion parameters. The profile passes
+`--engram-config '{"cpu_offload": true}'`, so each rank keeps its share in
+pinned host memory and the GPU reads it over the PCIe link. Set
+`DSV416PP_ENGRAM_CPU=false` to put the tables in video memory. Each card
+already holds about 50 GiB of layer weights, so they do not fit there.
 
 #### What a stage needs from the stage before it
 
@@ -962,17 +973,17 @@ buffer each stage refills.
 #### Recall test
 
 The profile recalls a fact planted at 15 percent and at 75 percent depth in
-prompts of 25,073, 103,073, 259,073 and 649,073 tokens. All eight runs pass.
+a prompt of 259,058 tokens. Both runs pass.
 
 #### Long context costs prefill, not decode
 
-Decode on a cached prompt of 259,079 tokens runs at 46.7 tokens per second.
-That matches the rate at 2,000 tokens. The indexer scores the whole context
-at layers 24, 28, 32 and 36 on every step. That work does not show in the
-decode time on this hardware.
+Decode on a cached prompt of 259,041 tokens runs at 54.5 tokens per second.
+The same server reaches 44.4 tokens per second on a short prompt. The long
+prompt is repetitive filler and DSpark accepts more of its drafts. The indexer scores the whole context at layers 24, 28, 32 and 36 on
+every step. That work does not show in the decode time on this hardware.
 
-Prefill is where length costs. The profile prefills 119,027 tokens at 5,078
-tokens per second and 779,069 tokens at 2,917 tokens per second.
+Prefill is where length costs. The profile prefills 118,225 tokens at 5,078
+tokens per second and 239,025 tokens at 4,786 tokens per second.
 
 ### dsv418: one pipeline stage per card
 
