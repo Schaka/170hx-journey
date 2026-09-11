@@ -2,10 +2,29 @@
 
 Every backend starts through
 [compose/docker-compose.yml](compose/docker-compose.yml). The compose file defines
-ten profiles: `dsv4`, `dsv4backport`, `qwen`, `qwen8gpu`, `qwenawq`,
-`glm53flash`, `glm53flash6gpu`, `glm53int4`, `glm53int48gpu`, and
-`glm53mix8gpu`. All ten are
+thirteen profiles. The table below names every one of them. All thirteen are
 mutually exclusive on this host, because they all bind port 8098.
+
+## One served name, one context size
+
+A client reads the context size from its own configuration. It cannot ask
+which profile is running. So each `--served-model-name` names exactly one
+context size. A profile that serves the same weights at a different size
+carries the size in its name.
+
+| served name | context | profile |
+|---|---|---|
+| `dsv4s` | 1,000,000 | `dsv4`, `dsv4backport` |
+| `qwen3.8-flash-next` | 1,000,000 | `qwen`, `qwen8gpu` |
+| `qwen3.8-flash-next-awq` | 1,000,000 | `qwenawq` |
+| `glm-5.3` | 1,048,576 | `glm53mix8gpu` |
+| `glm-5.3-flash` | 1,048,576 | `glm53flash6gpu` |
+| `glm-5.3-flash-262k` | 262,144 | `glm53flash` |
+| `glm-5.3-int4` | 262,144 | `glm53int48gpu` |
+| `glm-5.3-int4-524k` | 524,288 | `glm53int4` |
+| `deepseek-v4.1-flash` | 1,048,576 | `dsv41`, `dsv416`, `dsv418` |
+
+When the weights and the size both match, two profiles share a name.
 
 ## Model files
 

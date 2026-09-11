@@ -270,7 +270,7 @@ services:
       - --port
       - "8000"
       - --served-model-name
-      - glm-5.3-flash
+      - glm-5.3-flash-262k
       - --pipeline-parallel-size
       - "4"
       - --language-model-only
@@ -387,7 +387,7 @@ services:
       - --port
       - "8000"
       - --served-model-name
-      - glm-5.3-int4
+      - glm-5.3-int4-524k
       - --pipeline-parallel-size
       - "4"
       - --max-model-len
