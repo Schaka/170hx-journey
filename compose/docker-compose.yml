@@ -727,11 +727,6 @@ services:
       # the head, the DSpark drafter and the extra embedding table. Those
       # weigh about 10.2 GiB together, which is more than one layer.
       VLLM_PP_LAYER_PARTITION: "${DSV416PP_PARTITION:-7,7,7,7,7,5}"
-      # The prompt ends inside the thinking block. The checkpoint can close
-      # that block with its first token, which sends the whole deliberation
-      # to the client as chat text. This many tokens must pass before
-      # `</think>` is allowed.
-      VLLM_MIN_THINKING_TOKENS: "${DSV416PP_MIN_THINK:-32}"
     volumes:
       - ${DSV41_MODEL:-/models/DeepSeek-V4.1-Flash}:/model
       - ${HOME}/cache/dsv416pp/vllm:/root/.cache/vllm

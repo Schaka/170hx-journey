@@ -1038,33 +1038,6 @@ This is the same fix as patch `0023` in the
 [fork](https://github.com/Schaka/deepseek-v4-cmp170hx), written for this
 codebase.
 
-### A minimum number of tokens holds the thinking block open
-
-The V4.1 generation prompt ends with the `<think>` token, so every turn starts
-inside the thinking block. The checkpoint can close that block with its first
-generated token. The reasoning block is then empty. The model writes its
-deliberation into `content` instead. The real `</think>` at the end of that
-deliberation reaches the parser in its content state, where the parser absorbs
-it without an event. The client shows the thinking as chat text, and it writes
-that text back into the next turn.
-
-The parser cannot repair this. It already streamed the text as content, so it
-cannot relabel it. The fix belongs at sampling time.
-
-The build kit adds a floor to the thinking-token budget in
-`vllm/v1/worker/gpu/sample/thinking_budget.py`. That kernel already finds the
-last `<think>` and counts the tokens after it, for the opposite purpose. Above
-the budget it forces the end marker. Below the floor it forbids the same
-token, so the block cannot close yet. `VLLM_MIN_THINKING_TOKENS` sets the
-floor, and the `dsv416pp` profile sets 32. A request whose prompt is not
-inside a thinking block never reaches the check. A request that sends
-`thinking: false` therefore still returns no reasoning.
-
-The floor must live in this kernel. vLLM also accepts a custom logits
-processor through `--logits-processors`. That flag selects Model Runner V1.
-V1 then refuses to start with `Model Runner V1 does not support: dspark
-speculative decoding`.
-
 ### The parser recovers a tool call that opens inside the thinking block
 
 When a request omits the `thinking` flag, the model means thinking. The
@@ -1084,30 +1057,8 @@ model can drop the space in the wrapper and write `<｜DSML｜calls>`. The kit
 accepts that spelling as the wrapper. The lexer matches the longest literal
 first, so the correct wrapper behaves the same as before.
 
-The third path handles a lost special token. `｜DSML｜` is one token in the
-vocabulary. The model can drop it and write the markers in plain text, and it
-can mix the two spellings inside one call. This is a real example:
-
-```
-<tool_calls><invoke name="Bash"><parameter name="command">pwd</｜DSML｜ parameter></｜DSML｜ invoke></｜DSML｜ calls>
-```
-
-The kit adds `<invoke name="`, `</invoke>` and `</tool_calls>` as markers. The
-parser starts the call from the plain invoke marker. It closes the call on
-either spelling. It accepts only a tool name the request declares. The
-parameter patterns now read either spelling on each side of a value, and the
-`string="true"` attribute is optional. A value that carries no attribute
-parses as JSON first, then as plain text.
-
-The kit does not add a plain `<tool_calls>` wrapper marker. A bare wrapper
-carries no tool name to check. Text that talks about the protocol can then
-consume the rest of the message.
-
-Without the third path the whole call reaches the client as text, and the
-thinking block never closes.
-
-The first two paths are the same fixes as patches `0016` and `0018` in the
-fork, written for this codebase.
+These are the same fixes as patches `0016` and `0018` in the fork, written for
+this codebase.
 
 ### The profile does not set `--max-num-batched-tokens`
 
