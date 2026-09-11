@@ -683,6 +683,10 @@ steps:
    into the tree.
 4. Build the image as `localhost/vllm-backport-v41:sm80`.
 
+[`parser_checks.py`](patches/vllm-backport-v41/parser_checks.py) checks the
+parser edits against a built image. It needs no GPU. The base image fails four
+of its eleven checks and a build from this kit passes all of them.
+
 The kit needs podman and nothing else:
 
 ```bash
@@ -740,8 +744,9 @@ hidden-state tensor per micro-batch.
 - The chat API emits reasoning text under the name `reasoning` only. The kit
   emits `reasoning_content` beside it.
 - The parser recovers a tool call that lost its envelope from the content
-  state only. The kit adds the same recovery from the reasoning state, and a
-  near-miss envelope spelling.
+  state only. It also commits that call as soon as the name matches a declared tool. The kit
+  adds recovery from the reasoning state and a near-miss envelope spelling. It
+  also holds a recovered call until the invoke closes.
 
 ### Speculative decoding with DSpark
 
@@ -1070,6 +1075,28 @@ first, so the correct wrapper behaves the same as before.
 
 These are the same fixes as patches `0016` and `0018` in the fork, written for
 this codebase.
+
+### A recovered tool call must close before it counts
+
+A call that arrives without its envelope goes into a hold. The engine buffers its
+events and checks the name against the tools the request declares. It drops
+the hold once the name can no longer grow into one of those names. The kit keeps that
+hold open through the arguments and commits only at `</｜DSML｜ invoke>`. Prose
+that quotes an opening invoke marker therefore stays text, because it never
+closes. A call that arrives in its proper envelope never enters the hold, so
+its arguments still stream token by token.
+
+The reasoning pass runs the same engine with tool parsing switched off, and it
+owns no tool output. It reports the end of the thinking block and repeats the
+call verbatim, and the tool pass builds the call from that text. The kit makes
+the hold run in that pass too. Without it the pass ends the thinking block at
+the first invoke marker it sees, whatever the text turns out to be. The rest
+of the turn then lands in the answer. The reasoning pass reads the declared
+tool names from the request adjustment, which runs once per request.
+
+A `<｜DSML｜function_calls>` wrapper is the V3.2 spelling and stays verbatim.
+Inside the thinking block it keeps its own state, so quoting it does not move
+the text into the answer.
 
 ### The profile does not set `--max-num-batched-tokens`
 

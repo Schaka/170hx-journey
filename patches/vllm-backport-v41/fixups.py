@@ -574,9 +574,26 @@ sub(_PARSER,
                 (EventType.REASONING_END, EventType.TOOL_CALL_START),
                 validate_tool_name=True,
             ),
+            # A V3.2 wrapper quoted inside the thinking block stays
+            # thinking. Its own block keeps the reasoning content type, so
+            # the text does not move into the answer.
             (ParserState.REASONING, "FOREIGN_START"): Transition(
-                ParserState.FOREIGN_BLOCK,
-                (EventType.REASONING_END, EventType.TEXT_CHUNK),
+                ParserState.FOREIGN_REASONING_BLOCK,
+                (EventType.REASONING_CHUNK,),
+            ),
+            (
+                ParserState.FOREIGN_REASONING_BLOCK,
+                "FOREIGN_END",
+            ): Transition(
+                ParserState.REASONING,
+                (EventType.REASONING_CHUNK,),
+            ),
+            (
+                ParserState.FOREIGN_REASONING_BLOCK,
+                "TOOL_START",
+            ): Transition(
+                ParserState.TOOL_PREAMBLE,
+                (EventType.REASONING_END,),
             ),
 """)
 
@@ -676,5 +693,254 @@ sub("vllm/parser/deepseek_v41.py",
         "TOOL_END_LENIENT": DSML_TOOL_END_LENIENT,
         "INVOKE_PREFIX": DSML_INVOKE_PREFIX,
 """)
+
+# --- parser: the new state the reasoning-side foreign block needs -----------
+sub("vllm/parser/engine/parser_engine_config.py",
+    """    FOREIGN_BLOCK = auto()""",
+    """    FOREIGN_BLOCK = auto()
+    FOREIGN_REASONING_BLOCK = auto()""")
+
+sub(_PARSER,
+    """            ParserState.FOREIGN_BLOCK: EventType.TEXT_CHUNK,""",
+    """            ParserState.FOREIGN_BLOCK: EventType.TEXT_CHUNK,
+            ParserState.FOREIGN_REASONING_BLOCK: EventType.REASONING_CHUNK,""")
+
+_SPE = "vllm/parser/engine/streaming_parser_engine.py"
+sub(_SPE,
+    """        elif self.state == ParserState.REASONING:
+            events.append(
+                SemanticEvent(EventType.REASONING_END, tool_index=self.tool_index)
+            )
+            self.state = ParserState.CONTENT""",
+    """        elif self.state in (
+            ParserState.REASONING,
+            ParserState.FOREIGN_REASONING_BLOCK,
+        ):
+            events.append(
+                SemanticEvent(EventType.REASONING_END, tool_index=self.tool_index)
+            )
+            self.state = ParserState.CONTENT
+        elif self.state == ParserState.FOREIGN_BLOCK:
+            self.state = ParserState.CONTENT""")
+
+# --- parser: hold a recovered call until its invoke closes ------------------
+# The engine commits a recovered call as soon as the name validates, so
+# `<｜DSML｜ invoke name="bash">` written in prose commits on the closing
+# quote of the tag. Keep the hold open through the arguments and commit only
+# at the invoke close. Only a recovered call waits. A call that arrives in
+# its proper envelope never enters the hold, so ordinary argument streaming
+# is unchanged.
+sub("vllm/parser/engine/parser_engine_config.py",
+    """    validate_tool_name: bool = False""",
+    """    validate_tool_name: bool = False
+    # Commit a held tool call at this transition. A held call that leaves the
+    # argument state through any other transition goes back to being text.
+    commit_validated_tool_call: bool = False""")
+
+sub(_PARSER,
+    """            (ParserState.TOOL_ARGS, "INVOKE_END"): Transition(
+                ParserState.TOOL_BETWEEN,
+                (EventType.TOOL_CALL_END,),
+            ),""",
+    """            (ParserState.TOOL_ARGS, "INVOKE_END"): Transition(
+                ParserState.TOOL_BETWEEN,
+                (EventType.TOOL_CALL_END,),
+                commit_validated_tool_call=True,
+            ),""")
+
+# The name-completing transition no longer ends the hold. It validates the
+# name, keeps the events buffered and moves on to the arguments.
+sub(_SPE,
+    """    def _resolve_hold(
+        self,
+        transition: Transition,
+        value: str,
+        token_count: int = 0,
+    ) -> list[SemanticEvent]:
+        \"\"\"End the hold window at the name-completing transition.\"\"\"
+        name = "".join(self._held_name)
+        allowed = self.allowed_tool_names
+        if allowed is not None and name in allowed:
+            events = self._held_events
+            self._clear_hold()
+            events.extend(self._run_transition(transition, value, token_count))
+            return events
+        return self._abort_hold("".join(self._held_raw) + value)""",
+    """    def _resolve_hold(
+        self,
+        transition: Transition,
+        value: str,
+        token_count: int = 0,
+    ) -> list[SemanticEvent]:
+        \"\"\"Validate at the name, then commit at the invoke close.\"\"\"
+        if self.state == ParserState.TOOL_NAME:
+            name = "".join(self._held_name)
+            allowed = self.allowed_tool_names
+            if allowed is None or name not in allowed:
+                return self._abort_hold("".join(self._held_raw) + value)
+            self._held_raw.append(value)
+            self._held_events.extend(
+                self._run_transition(transition, value, token_count)
+            )
+            return []
+        if self.state == ParserState.TOOL_ARGS:
+            if not transition.commit_validated_tool_call:
+                # Any other way out of the arguments means the invoke never
+                # closed, so the whole run was text.
+                return self._abort_hold("".join(self._held_raw) + value)
+            self._held_raw.append(value)
+            self._held_events.extend(
+                self._run_transition(transition, value, token_count)
+            )
+            events = self._held_events
+            self._clear_hold()
+            return events
+        return self._abort_hold("".join(self._held_raw) + value)""")
+
+# Argument text, and the parameter closers that carry no transition, stay in
+# the buffer while the hold is open.
+sub(_SPE,
+    """        if self.state == ParserState.MESSAGE_HEADER:
+            self._message_header_buffer += text
+            self._message_header_token_count += token_count
+            return []
+        if self.state == ParserState.TOOL_ARGS:
+            if self.config.tool_args_json:
+                return self._feed_args_text(text)""",
+    """        if self._hold_active and self.state == ParserState.TOOL_ARGS:
+            self._held_raw.append(text)
+            self._held_events.append(
+                SemanticEvent(
+                    EventType.ARG_VALUE_CHUNK,
+                    value=text,
+                    tool_index=self.tool_index,
+                    token_count=token_count,
+                )
+            )
+            return []
+        if self.state == ParserState.MESSAGE_HEADER:
+            self._message_header_buffer += text
+            self._message_header_token_count += token_count
+            return []
+        if self.state == ParserState.TOOL_ARGS:
+            if self.config.tool_args_json:
+                return self._feed_args_text(text)""")
+
+# The end-of-stream abort already exists. It now also covers an invoke that
+# never closed, so say that.
+sub(_SPE,
+    """            # Stream ended before the recovered tool name completed:
+            # the held events never validated, so flush the raw text
+            # as content in the pre-recovery state.""",
+    """            # The stream ended before the recovered call completed, at
+            # the name or at the invoke close. The held events never
+            # committed, so flush the raw text as content in the
+            # pre-recovery state.""")
+print("validated tool-call hold done")
+
+# --- parser: validate before the reasoning pass hands a call over ----------
+# The reasoning pass runs the engine with `skip_tool_parsing` on. Every tool
+# terminal then takes the blanket branch below, so a `<｜DSML｜ invoke name="`
+# inside the thinking block ends the block and moves the rest of the turn into
+# the answer, whatever the text turns out to be. Let a `validate_tool_name`
+# transition run its hold instead. The hand-off to the tool pass then happens
+# only for a complete call that names a declared tool and closes its invoke.
+_SPE = "vllm/parser/engine/streaming_parser_engine.py"
+sub(_SPE,
+    """        if self.skip_tool_parsing and terminal in self._tool_terminals:""",
+    """        if self.skip_tool_parsing and (
+            transition.validate_tool_name or self._hold_active
+        ):
+            # A held call is still a candidate. Resolve it first, then let
+            # the commit below decide what the reasoning pass emits.
+            return self._apply_transition(transition, value, token_count)
+
+        if self.skip_tool_parsing and terminal in self._tool_terminals:""")
+
+# On commit inside the reasoning pass, emit the raw text rather than tool
+# events. The tool pass parses that text again and builds the call from it.
+sub(_SPE,
+    """        if self.state == ParserState.TOOL_ARGS:
+            if not transition.commit_validated_tool_call:
+                # Any other way out of the arguments means the invoke never
+                # closed, so the whole run was text.
+                return self._abort_hold("".join(self._held_raw) + value)
+            self._held_raw.append(value)""",
+    """        if self.state == ParserState.TOOL_ARGS:
+            if not transition.commit_validated_tool_call:
+                # Any other way out of the arguments means the invoke never
+                # closed, so the whole run was text.
+                return self._abort_hold("".join(self._held_raw) + value)
+            if self.skip_tool_parsing:
+                return self._hand_off_hold(value)
+            self._held_raw.append(value)""")
+
+sub(_SPE,
+    """    def _abort_hold(self, raw: str) -> list[SemanticEvent]:""",
+    """    def _hand_off_hold(self, value: str) -> list[SemanticEvent]:
+        \"\"\"Give a validated call to the tool pass as plain text.
+
+        The reasoning pass owns no tool output, so it reports the end of the
+        thinking block and repeats the call verbatim. The tool pass reads that
+        text from the content state and builds the call there.
+        \"\"\"
+        raw = "".join(self._held_raw) + value
+        prior_state = self._held_prior_state
+        prior_tool_index = self._held_prior_tool_index
+        self.state = ParserState.CONTENT
+        self.tool_index = prior_tool_index
+        self._recovered_tool_call = False
+        self._clear_hold()
+        events: list[SemanticEvent] = []
+        if prior_state == ParserState.REASONING:
+            events.append(
+                SemanticEvent(EventType.REASONING_END, tool_index=prior_tool_index)
+            )
+        events.append(
+            SemanticEvent(
+                EventType.TEXT_CHUNK, value=raw, tool_index=prior_tool_index
+            )
+        )
+        return events
+
+    def _abort_hold(self, raw: str) -> list[SemanticEvent]:""")
+
+# --- parser: the reasoning pass needs the declared tools -------------------
+# `_check_skip_tool_parsing` records the declared names and whether the
+# request forbids tool calls. Only the tool-side entry points call it, so the
+# reasoning pass would validate a held call against a stale tool set. The
+# request adjustment runs once per request, before any token, so do it there.
+sub("vllm/parser/engine/adapters.py",
+    """    def adjust_request(
+        self,
+        request: ChatCompletionRequest | ResponsesRequest,
+    ) -> ChatCompletionRequest | ResponsesRequest:
+        return self._parser_engine.adjust_request(request)
+
+    def has_engine_confirmed_reasoning_end(self) -> bool:""",
+    """    def adjust_request(
+        self,
+        request: ChatCompletionRequest | ResponsesRequest,
+    ) -> ChatCompletionRequest | ResponsesRequest:
+        request = self._parser_engine.adjust_request(request)
+        # The reasoning pass validates a recovered call, so it needs the
+        # declared tool names and the suppression state too.
+        self._parser_engine._check_skip_tool_parsing(request)
+        return request
+
+    def has_engine_confirmed_reasoning_end(self) -> bool:""")
+
+# --- parser: flush a deferred reasoning tail at the end of the stream ------
+# `finish_streaming` tests the deferred content only, so a trailing piece of
+# reasoning held back for whitespace trimming never reaches the client.
+sub("vllm/parser/engine/parser_engine.py",
+    """        if events or self._deferred_content:
+            return self._events_to_delta(events, finished=True)""",
+    """        if events or self._deferred_content or self._deferred_reasoning:
+            return self._strip_trailing_reasoning(
+                self._events_to_delta(events, finished=True)
+            )""")
+print("reasoning-pass validation done")
+
 print("parser reasoning-state recovery and lenient envelope done")
 
