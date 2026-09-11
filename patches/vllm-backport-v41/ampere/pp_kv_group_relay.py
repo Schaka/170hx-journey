@@ -177,6 +177,12 @@ class KVGroupRelay(nn.Module):
             fp8_scale=None,
         )
 
+        if self.index_k_cache is None:
+            # This stage starts on a layer that runs no indexer of its own.
+            # It reads the top-k indices the earlier stage published, which
+            # travel over the hop, so there is no indexer key cache to fill.
+            return
+
         # 2. The indexer K cache. Rows at non-boundary tokens hold garbage
         # latent and the store kernel skips them, the same as on the source.
         index_metadata = cast(Any, attn_metadata[self.index_k_cache.prefix])

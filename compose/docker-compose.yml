@@ -701,6 +701,83 @@ services:
       - --tool-call-parser
       - deepseek_v41
 
+  dsv416pp:
+    image: ${DSV416PP_IMAGE:-localhost/vllm-backport-v41:sm80}
+    container_name: deepseek-v41-flash-6gpu-pp
+    profiles: ["dsv416pp"]
+    devices:
+      - nvidia.com/gpu=0
+      - nvidia.com/gpu=1
+      - nvidia.com/gpu=2
+      - nvidia.com/gpu=3
+      - nvidia.com/gpu=4
+      - nvidia.com/gpu=5
+    shm_size: "16g"
+    ports:
+      - "8098:8000"
+    environment:
+      NCCL_ALGO: "Ring"
+      NCCL_PROTO: "Simple"
+      PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
+      OMP_NUM_THREADS: "1"
+      # One stage per card. The cut at layer 14 lands on a kv-sharing group
+      # boundary. The cuts at 7, 21, 28 and 35 land inside a group, so four
+      # stages run a relay. Stages 3 and 4 write no kv source, so they pass
+      # the latent on. The last stage takes 5 layers, because it also holds
+      # the head, the DSpark drafter and the extra embedding table. Those
+      # weigh about 10.2 GiB together, which is more than one layer.
+      VLLM_PP_LAYER_PARTITION: "${DSV416PP_PARTITION:-7,7,7,7,7,5}"
+    volumes:
+      - ${DSV41_MODEL:-/models/DeepSeek-V4.1-Flash}:/model
+      - ${HOME}/cache/dsv416pp/vllm:/root/.cache/vllm
+      - ${HOME}/cache/dsv416pp/flashinfer:/root/.cache/flashinfer
+      - ${HOME}/cache/dsv416pp/triton:/root/.triton
+      - ${HOME}/cache/dsv416pp/nv:/root/.nv
+      - ${HOME}/cache/dsv416pp/humming:/root/.humming
+      - ${HOME}/cache/dsv416pp/cupy:/root/.cupy
+      - ${HOME}/cache/dsv416pp/tilelang:/root/.tilelang
+    command:
+      - /model
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --served-model-name
+      - deepseek-v4.1-flash
+      # No tensor parallel. Every all-reduce on this box crosses a Gen2 x4
+      # link, so the pipeline hop carries the hidden states alone.
+      - --tensor-parallel-size
+      - "1"
+      - --pipeline-parallel-size
+      - "6"
+      - --attention-backend
+      - TRITON_MLA_SPARSE_DSV41
+      - --kv-cache-dtype
+      - fp8_ds_mla
+      - --block-size
+      - "${DSV416PP_BLOCK:-128}"
+      - --dtype
+      - bfloat16
+      - --max-model-len
+      - "${DSV416PP_MAXLEN:-1048576}"
+      - --gpu-memory-utilization
+      - "${DSV416PP_UTIL:-0.95}"
+      - --max-num-seqs
+      - "8"
+      - --enable-prefix-caching
+      - --enable-prompt-tokens-details
+      - --speculative-config
+      - '{"method":"dspark","num_speculative_tokens":${DSV416PP_SPEC_K:-5}}'
+      - --kernel-config
+      - '{"enable_jit_warmup": false}'
+      # Without these the thinking block stays inside `content`, and an agent
+      # client writes it back into the next turn.
+      - --reasoning-parser
+      - deepseek_v41
+      - --enable-auto-tool-choice
+      - --tool-call-parser
+      - deepseek_v41
+
   dsv418:
     image: ${DSV418_IMAGE:-localhost/vllm-backport-v41:sm80}
     container_name: deepseek-v41-flash-pp8

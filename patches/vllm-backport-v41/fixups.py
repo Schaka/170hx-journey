@@ -979,6 +979,11 @@ sub(_M41,
                     intermediate_tensors["kv_latent"][: positions.shape[0]],
                     positions,
                 )
+            if "topk_indices" in intermediate_tensors.tensors:
+                _n = positions.shape[0]
+                self.topk_indices_buffer[:_n].copy_(
+                    intermediate_tensors["topk_indices"][:_n]
+                )
             if self._relays_forward_latent:
                 _n = positions.shape[0]
                 self._relay_latent_buffer[:_n].copy_(
@@ -1081,6 +1086,14 @@ sub(_M41,
                     dtype=dtype,
                     device=device,
                 ),
+                # The top-k indices that the last index source on the
+                # sending stage published. A stage whose first layers run no
+                # indexer of their own read them from here.
+                "topk_indices": torch.zeros(
+                    (batch_size, self.topk_indices_buffer.shape[1]),
+                    dtype=torch.int32,
+                    device=device,
+                ),
                 **(
                     {
                         "candidate_blocks": torch.zeros(
@@ -1100,6 +1113,9 @@ sub(_M41,
                 }
             )""",
     """                    "kv_latent": self._relay_latent_buffer[: positions.shape[0]],
+                    "topk_indices": self.topk_indices_buffer[
+                        : positions.shape[0]
+                    ],
                     **(
                         {
                             "candidate_blocks": self.candidate_block_buffer[

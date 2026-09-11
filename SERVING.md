@@ -2,7 +2,7 @@
 
 Every backend starts through
 [compose/docker-compose.yml](compose/docker-compose.yml). The compose file defines
-thirteen profiles. The table below names every one of them. All thirteen are
+fourteen profiles. The table below names every one of them. All fourteen are
 mutually exclusive on this host, because they all bind port 8098.
 
 ## One served name, one context size
@@ -22,7 +22,7 @@ carries the size in its name.
 | `glm-5.3-flash-262k` | 262,144 | `glm53flash` |
 | `glm-5.3-int4` | 262,144 | `glm53int48gpu` |
 | `glm-5.3-int4-524k` | 524,288 | `glm53int4` |
-| `deepseek-v4.1-flash` | 1,048,576 | `dsv41`, `dsv416`, `dsv418` |
+| `deepseek-v4.1-flash` | 1,048,576 | `dsv41`, `dsv416`, `dsv416pp`, `dsv418` |
 
 When the weights and the size both match, two profiles share a name.
 
@@ -899,6 +899,71 @@ in `chat_template_kwargs` on every request. V4.1 reads a numeric budget from
 Without a value the model uses 50 and can drift into a repetition loop on
 long context.
 
+### dsv416pp: one pipeline stage per card on 6 GPUs
+
+The `dsv416pp` profile serves DeepSeek-V4.1-Flash on GPUs 0 to 5 with
+tensor-parallel-size 1 and pipeline-parallel-size 6. It is the fastest V4.1
+profile on this box. It prefills twice as fast as `dsv416` and three times as
+fast as `dsv41`, and it decodes faster at every stream count.
+
+| measure | dsv416pp | dsv416 | dsv41 |
+|---|---|---|---|
+| GPUs | 6 | 6 | 8 |
+| layout | TP1 x PP6 | TP2 x PP3 | TP4 x PP2 |
+| decode, 1 stream | 46.6 tok/s | 43.3 tok/s | 43.8 tok/s |
+| decode, 4 streams | 106.6 tok/s | 85.5 tok/s | 72.9 tok/s |
+| decode, 8 streams | 153.1 tok/s | not measured | 104.2 tok/s |
+| prefill, 119,027 tokens | 5,078 tok/s | 2,551 tok/s | 1,650 tok/s |
+| key-value pool | 2,196,629 tokens | 3,049,911 tokens | 14,058,003 tokens |
+| concurrency at 1,048,576 tokens | 2.09x | 2.91x | 13.41x |
+
+Prefill gains because the profile runs no all-reduce at all. Every all-reduce
+on this box crosses a Gen2 x4 link at about 1.6 GB/s. At tensor-parallel-size
+4 each layer moves about 16 MB per 2,048-token chunk, which sets a ceiling
+near 1,700 tokens per second. The pipeline hop carries the hidden states and
+the relay payload alone, which is far less traffic.
+
+The profile also prefills 39,027 tokens at 4,928 tokens per second and
+319,027 tokens at 4,209 tokens per second.
+
+#### The layer partition
+
+`VLLM_PP_LAYER_PARTITION` is `7,7,7,7,7,5`. Weights land at 51.27, 49.61,
+49.79, 49.60, 49.60 and about 45.7 GiB. The last stage takes 5 layers,
+because it also holds the head, the DSpark drafter and the extra embedding
+table. Those weigh about 10.2 GiB together, which is more than one layer.
+A partition of `7,7,7,7,6,6` puts about 52.9 GiB on the last stage and the
+engine then reports:
+
+```
+ValueError: To serve at least one request with the model's max seq len
+```
+
+#### What a stage needs from the stage before it
+
+Five of the six stages start on a layer that writes neither of the two
+caches it reads. The pipeline hop therefore carries four payloads beside the
+hidden states:
+
+- the compressor latent, which refills the replicated compressed cache,
+- the candidate blocks, which every later indexer masks its scores against,
+- the top-k indices, which a layer with no indexer of its own reads,
+- the `pre_mix` tensor the model already sent.
+
+The top-k indices matter because the model runs an indexer at layers 2, 8,
+14, 20, 24, 28, 32 and 36 only. Every other layer reads the indices the last
+one published. A cut between an indexer layer and its readers leaves those
+readers with an empty buffer. They then read the wrong part of the context.
+
+A stage that writes no kv source of its own passes the latent it receives
+on to the next stage. The candidate blocks chain the same way, through the
+buffer each stage refills.
+
+#### Recall test
+
+The profile recalls a fact planted at 15 percent and at 75 percent depth in
+prompts of 25,073, 103,073, 259,073 and 649,073 tokens. All eight runs pass.
+
 ### dsv418: one pipeline stage per card
 
 The `dsv418` profile serves DeepSeek-V4.1-Flash on all 8 GPUs with
@@ -936,6 +1001,10 @@ Stages 5 and 6 write no kv source of their own. The hop carries one latent
 slot, filled by the last kv source on the sending stage. A stage with no kv
 source copies the latent it receives into that slot and sends it on. The
 candidate blocks chain the same way, through the buffer each stage refills.
+
+Only the cut at layer 20 falls on an indexer layer, so six stages also read
+the top-k indices from the hop. See the `dsv416pp` section above for what
+each payload does.
 
 The last stage carries the head, the DSpark drafter and the extra embedding
 table, about 5.1 GiB on top of its 5 layers. If it reports `ValueError: No
@@ -1043,5 +1112,7 @@ because all twelve profiles share port 8098.
   (DeepSeek-V4.1-Flash, all 8 GPUs).
 - `run-dsv41-6gpu-podman.sh` starts the `dsv416` profile
   (DeepSeek-V4.1-Flash, 6 GPUs).
+- `run-dsv41-6gpu-pp-podman.sh` starts the `dsv416pp` profile
+  (DeepSeek-V4.1-Flash, 6 GPUs, one pipeline stage per card).
 - `run-dsv41-pp8-podman.sh` starts the `dsv418` profile
   (DeepSeek-V4.1-Flash, all 8 GPUs, one pipeline stage per card).
