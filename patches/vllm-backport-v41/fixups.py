@@ -1143,3 +1143,135 @@ sub("vllm/entrypoints/openai/chat_completion/protocol.py", _ALIAS_OLD, _ALIAS_NE
 # Every streamed delta. A client that checks each chunk needs it here too.
 sub("vllm/entrypoints/openai/engine/protocol.py", _ALIAS_OLD, _ALIAS_NEW)
 print("reasoning_content alias done")
+
+# --- parser: recover a tool call the model opens inside <think> ------------
+# The parser starts a turn in REASONING, because V4.1 means thinking when the
+# request omits the thinking flag. The tree recovers a tool call that lost its
+# envelope only from CONTENT, so a call that opens before `</think>` never
+# reaches the recovery path. It leaks as raw protocol text inside the thinking
+# block, and the block never closes cleanly.
+_PARSER = "vllm/parser/deepseek_v4.py"
+
+sub(_PARSER,
+    """            (ParserState.CONTENT, "INVOKE_PREFIX"): Transition(
+                ParserState.TOOL_NAME,
+                (EventType.TOOL_CALL_START,),
+                validate_tool_name=True,
+            ),
+""",
+    """            (ParserState.CONTENT, "INVOKE_PREFIX"): Transition(
+                ParserState.TOOL_NAME,
+                (EventType.TOOL_CALL_START,),
+                validate_tool_name=True,
+            ),
+            # The same recovery, reached while still inside <think>. Close
+            # the reasoning block first, so the text before the marker stays
+            # reasoning and the tool call does not land in it.
+            (ParserState.REASONING, "INVOKE_PREFIX"): Transition(
+                ParserState.TOOL_NAME,
+                (EventType.REASONING_END, EventType.TOOL_CALL_START),
+                validate_tool_name=True,
+            ),
+            (ParserState.REASONING, "FOREIGN_START"): Transition(
+                ParserState.FOREIGN_BLOCK,
+                (EventType.REASONING_END, EventType.TEXT_CHUNK),
+            ),
+""")
+
+# --- parser: accept a near-miss tool-calls envelope ------------------------
+# Near the context ceiling the checkpoint sometimes writes the envelope with
+# an underscore in place of the space, around a well-formed body. The lexer
+# matches the longest literal first, so the correct envelope is untouched.
+sub(_PARSER,
+    """DSML_FOREIGN_TOOL_END = f"</{_DSML}function_calls>"
+""",
+    """DSML_FOREIGN_TOOL_END = f"</{_DSML}function_calls>"
+# Near-miss envelope spellings, accepted so the call parses instead of
+# reaching the client as raw protocol text
+DSML_TOOL_START_LENIENT = f"<{_DSML}_tool_calls>"
+DSML_TOOL_END_LENIENT = f"</{_DSML}_tool_calls>"
+""")
+
+sub(_PARSER,
+    """            "TOOL_END": DSML_TOOL_END,
+            "INVOKE_PREFIX": DSML_INVOKE_PREFIX,
+""",
+    """            "TOOL_END": DSML_TOOL_END,
+            "TOOL_START_LENIENT": DSML_TOOL_START_LENIENT,
+            "TOOL_END_LENIENT": DSML_TOOL_END_LENIENT,
+            "INVOKE_PREFIX": DSML_INVOKE_PREFIX,
+""")
+
+sub(_PARSER,
+    """            (ParserState.CONTENT, "TOOL_START"): Transition(
+                ParserState.TOOL_PREAMBLE,
+                (),
+            ),
+""",
+    """            (ParserState.CONTENT, "TOOL_START"): Transition(
+                ParserState.TOOL_PREAMBLE,
+                (),
+            ),
+            (ParserState.REASONING, "TOOL_START_LENIENT"): Transition(
+                ParserState.TOOL_PREAMBLE,
+                (EventType.REASONING_END,),
+            ),
+            (ParserState.CONTENT, "TOOL_START_LENIENT"): Transition(
+                ParserState.TOOL_PREAMBLE,
+                (),
+            ),
+""")
+
+sub(_PARSER,
+    """            (ParserState.TOOL_ARGS, "TOOL_END"): Transition(
+                ParserState.CONTENT,
+                (EventType.TOOL_CALL_END,),
+            ),
+""",
+    """            (ParserState.TOOL_ARGS, "TOOL_END"): Transition(
+                ParserState.CONTENT,
+                (EventType.TOOL_CALL_END,),
+            ),
+            (ParserState.TOOL_ARGS, "TOOL_END_LENIENT"): Transition(
+                ParserState.CONTENT,
+                (EventType.TOOL_CALL_END,),
+            ),
+""")
+
+sub(_PARSER,
+    """            (ParserState.TOOL_BETWEEN, "TOOL_END"): Transition(
+                ParserState.CONTENT,
+                (),
+            ),
+""",
+    """            (ParserState.TOOL_BETWEEN, "TOOL_END"): Transition(
+                ParserState.CONTENT,
+                (),
+            ),
+            (ParserState.TOOL_BETWEEN, "TOOL_END_LENIENT"): Transition(
+                ParserState.CONTENT,
+                (),
+            ),
+""")
+
+# V4.1 spaces its markers, so it needs its own near-miss spelling. Its block
+# name is " calls", and the near miss drops the space. The transitions above
+# carry over, because the V4.1 configuration only replaces the literals.
+sub("vllm/parser/deepseek_v41.py",
+    """DSML_PARAM_CLOSE = "</｜DSML｜ parameter>"
+""",
+    """DSML_PARAM_CLOSE = "</｜DSML｜ parameter>"
+DSML_TOOL_START_LENIENT = "<｜DSML｜calls>"
+DSML_TOOL_END_LENIENT = "</｜DSML｜calls>"
+""")
+
+sub("vllm/parser/deepseek_v41.py",
+    """        "TOOL_END": DSML_TOOL_END,
+        "INVOKE_PREFIX": DSML_INVOKE_PREFIX,
+""",
+    """        "TOOL_END": DSML_TOOL_END,
+        "TOOL_START_LENIENT": DSML_TOOL_START_LENIENT,
+        "TOOL_END_LENIENT": DSML_TOOL_END_LENIENT,
+        "INVOKE_PREFIX": DSML_INVOKE_PREFIX,
+""")
+print("parser reasoning-state recovery and lenient envelope done")

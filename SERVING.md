@@ -897,6 +897,28 @@ This is the same fix as patch `0023` in the
 [fork](https://github.com/Schaka/deepseek-v4-cmp170hx), written for this
 codebase.
 
+### The parser recovers a tool call that opens inside the thinking block
+
+When a request omits the `thinking` flag, the model means thinking. The
+parser therefore starts each turn in its reasoning state. The kit adds two
+recovery paths for that state.
+
+The first path handles a lost envelope. The model can write a well-formed
+`<｜DSML｜ invoke ...>` block without the `<｜DSML｜ calls>` wrapper that
+opens it. The parser then starts the tool call from the invoke marker alone,
+and it accepts only a tool name the request declares. The base tree does this
+from the content state. The kit adds the same path from the reasoning state.
+It closes the reasoning block first, so the thinking text stays reasoning and
+the call does not land inside it.
+
+The second path handles a near-miss envelope. Near the context ceiling the
+model can drop the space in the wrapper and write `<｜DSML｜calls>`. The kit
+accepts that spelling as the wrapper. The lexer matches the longest literal
+first, so the correct wrapper behaves the same as before.
+
+These are the same fixes as patches `0016` and `0018` in the fork, written for
+this codebase.
+
 ### The profile does not set `--max-num-batched-tokens`
 
 Speculative decoding makes vLLM pick 2048 and print this warning:
