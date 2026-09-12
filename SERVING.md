@@ -1130,15 +1130,27 @@ indexer picks. A fact near the end of the prompt sits in the local window. The m
 reads it without the indexer, so the run passes even on a broken indexer. Plant the fact in the first few percent instead, and the answer
 depends on the indexer picking the right blocks.
 
-Run it at two depths against every profile that splits a group:
+Run it against every profile that splits a group:
 
 ```bash
 python3 context_check.py 8098 10 40000 5
-python3 context_check.py 8098 10 60000 2
 ```
 
-Both score 0 wrong of 10 on `dsv416pp` and on `dsv41`. A run at 100 percent
-depth proves nothing, and neither does a short prompt.
+`dsv416pp` scores 0 wrong at every size and depth measured:
+
+| prompt tokens | depth | wrong |
+|---|---|---|
+| 8,923 | 5% | 0 of 6 |
+| 44,201 | 5% | 0 of 10 |
+| 66,240 | 2% | 0 of 10 |
+| 328,784 | 5% | 0 of 6 |
+| 328,784 | 50% | 0 of 4 |
+| 331,149 | 97% | 0 of 6 |
+| 654,756 | 5% | 0 of 4 |
+
+The 97 percent row holds the fact about 10,000 tokens from the end. When an agent
+looks up an old tool result, it reads that shape. A run at 100
+percent depth proves nothing, and neither does a short prompt.
 
 ### The profile does not set `--max-num-batched-tokens`
 
