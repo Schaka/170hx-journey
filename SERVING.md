@@ -1163,8 +1163,9 @@ reply. One captured agent session shows this on 11 of 68 steps.
 The sampler stops it. The thinking-token budget already finds the last
 `<think>` and counts the tokens after it, to force the end marker at the top
 of the budget. The kit adds a floor to the same kernel. Below the floor it
-forbids that token instead. `VLLM_MIN_THINKING_TOKENS` sets the floor, the
-profile sets 32, and 0 keeps the stock behavior.
+forbids that token instead. `VLLM_MIN_THINKING_TOKENS` sets the floor, and 0
+keeps the stock behavior. The `dsv41`, `dsv416pp` and `dsv418` profiles set 32.
+All three run the same image, so the floor reaches every card count.
 
 A logits processor cannot do this work. vLLM runs custom logits processors on
 the V1 model runner only, and DSpark needs the V2 runner, so

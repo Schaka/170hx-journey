@@ -564,6 +564,10 @@ services:
       PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
       OMP_NUM_THREADS: "1"
       VLLM_PP_LAYER_PARTITION: "${DSV41_PARTITION:-20,20}"
+      # The model can close its thinking block with its first token and write
+      # the deliberation into the answer. The sampler holds the block open
+      # for this many tokens. Zero keeps the stock behavior.
+      VLLM_MIN_THINKING_TOKENS: "${DSV41_MIN_THINK:-32}"
     volumes:
       - ${DSV41_MODEL:-/models/DeepSeek-V4.1-Flash}:/model
       - ${HOME}/cache/dsv41/vllm:/root/.cache/vllm
@@ -804,6 +808,10 @@ services:
       # a kv-sharing group, so six stages run a relay. Three of them hold no
       # kv source of their own and pass the latent straight through.
       VLLM_PP_LAYER_PARTITION: "${DSV418_PARTITION:-5,5,5,5,5,5,5,5}"
+      # The model can close its thinking block with its first token and write
+      # the deliberation into the answer. The sampler holds the block open
+      # for this many tokens. Zero keeps the stock behavior.
+      VLLM_MIN_THINKING_TOKENS: "${DSV418_MIN_THINK:-32}"
     volumes:
       - ${DSV41_MODEL:-/models/DeepSeek-V4.1-Flash}:/model
       - ${HOME}/cache/dsv418/vllm:/root/.cache/vllm
