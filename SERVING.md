@@ -839,6 +839,10 @@ fields: ['annotations', 'audio', 'content', 'function_call', 'reasoning',
 
 ### dsv416: the same model on 6 GPUs
 
+**This profile splits a kv-sharing group and reads its own prompt
+incorrectly. Do not use it for real work.** See "A relayed pipeline
+stage corrupts the prompt".
+
 The `dsv416` profile serves DeepSeek-V4.1-Flash on GPUs 0 to 5, with
 tensor-parallel-size 2 and pipeline-parallel-size 3. It frees 2 cards for
 other work and it prefills faster than the 8-card profile. It holds far less
@@ -1002,6 +1006,10 @@ tokens per second and 239,025 tokens at 4,786 tokens per second.
 
 ### dsv418: one pipeline stage per card
 
+**This profile splits a kv-sharing group and reads its own prompt
+incorrectly. Do not use it for real work.** See "A relayed pipeline
+stage corrupts the prompt".
+
 The `dsv418` profile serves DeepSeek-V4.1-Flash on all 8 GPUs with
 tensor-parallel-size 1 and pipeline-parallel-size 8. It carries no measured
 numbers yet.
@@ -1118,9 +1126,12 @@ was asked about. One example is `/home/Schalke/rocm-gfx803` in place of
 runs out of budget.
 
 [`context_check.py`](patches/vllm-backport-v41/context_check.py) measures it.
-The prompt is dense prose that names one rare path once, and the question asks
-for that path alone. Every trial carries a different salt, so no trial reads
-the answer out of the prefix cache.
+It needs a prompt body, a rare path planted once, and a question asking for
+that path alone. Every trial carries a different salt, so no trial reads the
+answer out of the prefix cache.
+
+The prompt body has to be a real agent preamble. A captured one of about
+6,300 tokens, holding workspace instructions and a tool list, gives this:
 
 | profile | layout | relays | wrong |
 |---|---|---|---|
@@ -1131,15 +1142,19 @@ Both runs used one image, one checkpoint and one prompt. The only difference
 is the layer partition. `dsv41` cuts at layer 20, which is a kv-sharing group
 boundary, so it runs no relay and answers correctly every time.
 
+Generated prose does not reproduce the fault. The prompt the script builds by
+itself varies every line and reaches the same size, and `dsv416pp` scores 0
+wrong of 8 on it. Treat a passing run of the built-in prompt as no evidence.
+
 Three things the fault does not depend on:
 
 - **Prompt length.** It shows at 593 tokens, which is one prefill chunk, and
   at 6,327 tokens, which is four.
 - **The build.** The image built from the kit at commit `a868259` scores 7
   wrong of 10 on the same prompt and layout, so the fault is not new.
-- **Prompt content that repeats.** Padding of repeated filler hides it up to
-  11,106 tokens, because the model can rebuild a lost line from its
-  neighbours. Only dense prose exposes it.
+- **Prompt size alone.** Repeated filler hides it up to 11,106 tokens.
+  Generated prose with a different line every time hides it too. Only a real
+  agent preamble shows it so far. That gap is the open work.
 
 A prompt served from the prefix cache answers correctly. Only tokens that the
 relay stage writes in the current step come back wrong.

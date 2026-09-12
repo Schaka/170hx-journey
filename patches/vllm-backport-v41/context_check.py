@@ -1,17 +1,24 @@
 #!/usr/bin/env python3
 """Check that the server reads its own prompt correctly.
 
-The prompt is a block of dense technical text that names one rare string.
-The model is asked for that string alone. A wrong answer means the server
-read the prompt incorrectly, because the string is right there in the
-context. The failure is a garbled copy of the string, not a refusal.
+The prompt names one rare string once, and the question asks for that string
+alone. A wrong answer means the server read the prompt incorrectly, because
+the string is right there in the context. The failure is a garbled copy of
+the string, not a refusal.
 
 Usage:
 
-    python3 context_check.py [PORT] [TRIALS] [TOKENS]
+    python3 context_check.py [PORT] [TRIALS] [TOKENS] [PROMPT_FILE]
 
-Every trial puts a different salt at the front, so no trial reads the
-answer out of the prefix cache. The script prints an M-of-N count.
+PROMPT_FILE is a text file holding the body of the prompt. The script appends
+the fact and the question to it, and puts a per-trial salt at the front so no
+trial reads the answer out of the prefix cache.
+
+The built-in prompt is a smoke test and is not sufficient. Generated prose,
+however varied, scores 0 wrong of 8 on a layout that a captured agent preamble
+fails 6 times out of 6. Pass a real preamble through PROMPT_FILE to test for
+the fault that SERVING.md describes under "A relayed pipeline stage corrupts
+the prompt".
 """
 import json
 import re
@@ -21,6 +28,7 @@ import urllib.request
 PORT = sys.argv[1] if len(sys.argv) > 1 else "8098"
 TRIALS = int(sys.argv[2]) if len(sys.argv) > 2 else 8
 TOKENS = int(sys.argv[3]) if len(sys.argv) > 3 else 6000
+PROMPT_FILE = sys.argv[4] if len(sys.argv) > 4 else None
 BASE = f"http://127.0.0.1:{PORT}/v1/chat/completions"
 
 NEEDLE = "/home/Schaka/Documents/rocm-gfx803"
@@ -50,6 +58,8 @@ def build(salt: int) -> str:
     neighbours, and the salt makes each trial miss the prefix cache.
     """
     lines = [f"Report {salt}. Read the notes, then answer the question.", ""]
+    if PROMPT_FILE:
+        return "\n".join(lines + [open(PROMPT_FILE).read(), "", FACT])
     i = 0
     while len(" ".join(lines)) < TOKENS * 4:
         subject = SUBJECTS[(i * 7 + salt) % len(SUBJECTS)]
