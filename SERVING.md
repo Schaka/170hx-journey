@@ -1152,6 +1152,8 @@ Three things the fault does not depend on:
   at 6,327 tokens, which is four.
 - **The build.** The image built from the kit at commit `a868259` scores 7
   wrong of 10 on the same prompt and layout, so the fault is not new.
+- **Speculative decoding.** The same layout without `--speculative-config`
+  scores 6 wrong of 6, so the drafter and its buffers are not involved.
 - **Prompt size alone.** Repeated filler hides it up to 11,106 tokens.
   Generated prose with a different line every time hides it too. Only a real
   agent preamble shows it so far. That gap is the open work.
