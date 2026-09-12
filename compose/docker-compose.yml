@@ -727,6 +727,10 @@ services:
       # the head, the DSpark drafter and the extra embedding table. Those
       # weigh about 10.2 GiB together, which is more than one layer.
       VLLM_PP_LAYER_PARTITION: "${DSV416PP_PARTITION:-7,7,7,7,7,5}"
+      # The model can close its thinking block with its first token and write
+      # the deliberation into the answer. The sampler holds the block open
+      # for this many tokens. Zero keeps the stock behavior.
+      VLLM_MIN_THINKING_TOKENS: "${DSV416PP_MIN_THINK:-32}"
     volumes:
       - ${DSV41_MODEL:-/models/DeepSeek-V4.1-Flash}:/model
       - ${HOME}/cache/dsv416pp/vllm:/root/.cache/vllm

@@ -1152,17 +1152,33 @@ The 97 percent row holds the fact about 10,000 tokens from the end. When an agen
 looks up an old tool result, it reads that shape. A run at 100
 percent depth proves nothing, and neither does a short prompt.
 
-### The model sometimes skips its thinking block
+### The thinking block has a floor
 
-The chat template opens the thinking block, so the parser starts in the
-reasoning state and the model must write `</think>` to begin its answer. On
-some steps the model writes `</think>` first and puts its deliberation in the
-answer instead. The client then shows text such as `Let me batch: read the
-region 940-965` where it expects a reply. One captured agent session shows
-this on 11 of 68 steps, and every one of those steps still made correct tool
-calls.
+The V4.1 chat template opens the thinking block, so the model must write
+`</think>` to begin its answer. On some steps it writes `</think>` as the
+first token and puts its deliberation in the answer instead. The client then
+shows text such as `Let me batch: read the region 940-965` where it expects a
+reply. One captured agent session shows this on 11 of 68 steps.
 
-Four things it does not depend on:
+The sampler stops it. The thinking-token budget already finds the last
+`<think>` and counts the tokens after it, to force the end marker at the top
+of the budget. The kit adds a floor to the same kernel. Below the floor it
+forbids that token instead. `VLLM_MIN_THINKING_TOKENS` sets the floor, the
+profile sets 32, and 0 keeps the stock behavior.
+
+A logits processor cannot do this work. vLLM runs custom logits processors on
+the V1 model runner only, and DSpark needs the V2 runner, so
+`--logits-processors` makes the engine refuse to start:
+
+```
+Value error, Model Runner V1 does not support: dspark speculative decoding
+```
+
+One captured conversation of 130,972 tokens gives empty reasoning 6 times of
+6 without the floor. The same step gives 0 times of 6 with it. The tool calls
+stay the same either way.
+
+Three things the fault does not depend on:
 
 - **The parser.** No `<think>` or `</think>` reaches the client, and the tool
   calls parse. The reasoning field is empty because the model emitted nothing
@@ -1170,8 +1186,6 @@ Four things it does not depend on:
 - **`reasoning_effort`.** Every value renders the same prompt length, and
   `max` does not change the rate. Only `none` changes the prompt, because it
   turns thinking off.
-- **Earlier leaked text in the history.** Replaying the same conversation
-  with every pre-tool-call text dropped gives the same rate.
 - **Context length on its own.** The same conversation replayed at 55,226,
   79,811, 107,120, 121,532, 128,849, 132,709 and 141,485 tokens keeps its
   thinking block every time.
@@ -1179,10 +1193,6 @@ Four things it does not depend on:
 Pass `reasoning_effort` as an integer from 1 to 100 inside
 `chat_template_kwargs`. A top-level integer returns HTTP 400. The strings
 `low`, `high`, `xhigh`, `max` and `none` work in both places.
-
-A client can repair the display. A step with an empty reasoning field that
-ends in tool calls holds deliberation, not an answer. A step that answers the
-user makes no tool call.
 
 ### The profile does not set `--max-num-batched-tokens`
 

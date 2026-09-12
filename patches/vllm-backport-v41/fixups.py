@@ -944,3 +944,196 @@ print("reasoning-pass validation done")
 
 print("parser reasoning-state recovery and lenient envelope done")
 
+
+# --- sampler: hold the thinking block open for a minimum token count -------
+# The V4.1 generation prompt ends with the `<think>` token, so every turn
+# starts inside the thinking block. The checkpoint can close that block with
+# its first generated token. The reasoning block is then empty, the model
+# writes its deliberation into `content`, and the real `</think>` at the end
+# reaches the parser in its content state, which absorbs it without an event.
+#
+# The thinking-token budget already finds the last `<think>` and counts the
+# tokens after it, for the opposite purpose. These edits add a floor to the
+# same kernel. Above the floor it forces the end marker as before. Below the
+# floor it forbids the same token instead.
+#
+# This runs in the Model Runner V2 sampler. A custom logits processor cannot
+# do the job, because `--logits-processors` forces Model Runner V1, and V1
+# rejects DSpark speculative decoding.
+_TB = "vllm/v1/worker/gpu/sample/thinking_budget.py"
+
+sub(_TB,
+    """from typing import TYPE_CHECKING
+
+import numpy as np
+""",
+    """import os
+from typing import TYPE_CHECKING
+
+import numpy as np
+""")
+
+sub(_TB,
+    """        self.enabled = bool(start_ids and end_ids and natural_end_ids)
+        if not self.enabled:
+            return
+""",
+    """        self.enabled = bool(start_ids and end_ids and natural_end_ids)
+        # The floor, in tokens. Zero keeps the stock behavior.
+        self.min_thinking_tokens = int(
+            os.environ.get("VLLM_MIN_THINKING_TOKENS", "0") or 0
+        )
+        if not self.enabled:
+            return
+""")
+
+# Every request takes part once a floor is set, not only a request that asks
+# for a budget.
+sub(_TB,
+    """        budget = sampling_params.thinking_token_budget
+        self.use_thinking_budget[req_idx] = budget is not None
+        if budget is None:
+            budget = -1
+        else:
+            budget = min(budget, _INT32_MAX)
+            self._reset_reqs.append(req_idx)
+""",
+    """        budget = sampling_params.thinking_token_budget
+        self.use_thinking_budget[req_idx] = (
+            budget is not None or self.min_thinking_tokens > 0
+        )
+        if budget is None:
+            budget = -1
+        else:
+            budget = min(budget, _INT32_MAX)
+        if self.use_thinking_budget[req_idx]:
+            self._reset_reqs.append(req_idx)
+""")
+
+sub(_TB,
+    """            self.natural_reasoning_end_token_ids,
+            self.reasoning_end_token_ids,
+        )
+
+
+@triton.jit
+def _load_effective_token(
+""",
+    """            self.natural_reasoning_end_token_ids,
+            self.reasoning_end_token_ids,
+            self.min_thinking_tokens,
+        )
+
+
+@triton.jit
+def _load_effective_token(
+""")
+
+sub(_TB,
+    """    START_LEN: tl.constexpr,
+    NATURAL_END_LEN: tl.constexpr,
+    MAX_LEN: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    req_state_idx = tl.load(req_ids_ptr + tl.program_id(0))
+    budget = tl.load(thinking_token_budget_ptr + req_state_idx)
+    if budget < 0:
+        return
+""",
+    """    START_LEN: tl.constexpr,
+    NATURAL_END_LEN: tl.constexpr,
+    MAX_LEN: tl.constexpr,
+    BLOCK: tl.constexpr,
+    MIN_THINK: tl.constexpr,
+):
+    req_state_idx = tl.load(req_ids_ptr + tl.program_id(0))
+    budget = tl.load(thinking_token_budget_ptr + req_state_idx)
+    if budget < 0 and MIN_THINK <= 0:
+        return
+""")
+
+sub(_TB,
+    """    START_LEN: tl.constexpr,
+    NATURAL_END_LEN: tl.constexpr,
+    END_LEN: tl.constexpr,
+):
+    token_idx = tl.program_id(0).to(tl.int64)
+    req_state_idx = tl.load(expanded_idx_mapping_ptr + token_idx)
+    budget = tl.load(thinking_token_budget_ptr + req_state_idx)
+    if budget < 0:
+        return
+""",
+    """    START_LEN: tl.constexpr,
+    NATURAL_END_LEN: tl.constexpr,
+    END_LEN: tl.constexpr,
+    MIN_THINK: tl.constexpr,
+):
+    token_idx = tl.program_id(0).to(tl.int64)
+    req_state_idx = tl.load(expanded_idx_mapping_ptr + token_idx)
+    budget = tl.load(thinking_token_budget_ptr + req_state_idx)
+    if budget < 0 and MIN_THINK <= 0:
+        return
+""")
+
+sub(_TB,
+    """    num_reasoning_tokens = effective_len - reasoning_start
+    if num_reasoning_tokens < budget:
+        return
+""",
+    """    num_reasoning_tokens = effective_len - reasoning_start
+    below_floor = num_reasoning_tokens < MIN_THINK
+    if not below_floor:
+        if budget < 0:
+            return
+        if num_reasoning_tokens < budget:
+            return
+""")
+
+sub(_TB,
+    """    force_token_id = tl.load(reasoning_end_token_ids_ptr + end_prefix_len)
+    tl.store(logits_ptr + token_idx * logits_stride + force_token_id, 1.0e9)
+""",
+    """    marker_token_id = tl.load(reasoning_end_token_ids_ptr + end_prefix_len)
+    # Above the floor this position carries the marker to force. Below the
+    # floor it carries the token to forbid, so the block cannot close yet.
+    fill = 1.0e9
+    if below_floor:
+        fill = -1.0e9
+    tl.store(logits_ptr + token_idx * logits_stride + marker_token_id, fill)
+""")
+
+sub(_TB,
+    """    reasoning_end_token_ids: torch.Tensor,
+) -> None:
+    num_tokens = logits.shape[0]
+""",
+    """    reasoning_end_token_ids: torch.Tensor,
+    min_thinking_tokens: int = 0,
+) -> None:
+    num_tokens = logits.shape[0]
+""")
+
+sub(_TB,
+    """        MAX_LEN=max(start_len, natural_end_len),
+        BLOCK=_COLD_SCAN_BLOCK,
+    )
+""",
+    """        MAX_LEN=max(start_len, natural_end_len),
+        BLOCK=_COLD_SCAN_BLOCK,
+        MIN_THINK=min_thinking_tokens,
+    )
+""")
+
+sub(_TB,
+    """        START_LEN=start_len,
+        NATURAL_END_LEN=natural_end_len,
+        END_LEN=end_len,
+    )
+""",
+    """        START_LEN=start_len,
+        NATURAL_END_LEN=natural_end_len,
+        END_LEN=end_len,
+        MIN_THINK=min_thinking_tokens,
+    )
+""")
+print("thinking-token floor done")
