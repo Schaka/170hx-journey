@@ -178,9 +178,10 @@ class KVGroupRelay(nn.Module):
         )
 
         if self.index_k_cache is None:
-            # This stage starts on a layer that runs no indexer of its own.
-            # It reads the top-k indices the earlier stage published, which
-            # travel over the hop, so there is no indexer key cache to fill.
+            # No layer on this stage runs an indexer that reads the source
+            # keys. The layers here take the top-k indices the earlier stage
+            # published, which travel over the hop, so there is no indexer
+            # key cache to fill.
             return
 
         # 2. The indexer K cache. Rows at non-boundary tokens hold garbage
@@ -198,6 +199,85 @@ class KVGroupRelay(nn.Module):
             self.compress_ratio,
             self.use_fp4_kv,
         )
+
+
+def _indexer_fp4() -> bool:
+    """Does the indexer K cache hold MXFP4 keys? On sm_80 it holds fp8."""
+    from vllm.config import get_current_vllm_config
+    from vllm.models.deepseek_v4_1.attention import dsa_indexer_uses_fp4
+
+    return dsa_indexer_uses_fp4(get_current_vllm_config())
+
+
+def _stage_reads_index_keys(source_layer_id: int, config: Any) -> bool:
+    """Does a layer on this stage run an indexer that reads the source keys?
+
+    A layer between the source and the next kv source reads the source keys
+    only when it is an index source of its own. A kv source owns its keys and
+    reads nobody else's. The stage that holds the real source layer never asks
+    this question, because it never builds a relay.
+    """
+    from vllm.distributed import get_pp_group
+    from vllm.distributed.utils import get_pp_indices
+
+    pp_group = get_pp_group()
+    start, end = get_pp_indices(
+        config.num_hidden_layers, pp_group.rank_in_group, pp_group.world_size
+    )
+    kv_sources = set(config.kv_source_layer_ids)
+    index_sources = set(config.index_source_layer_ids)
+    group_end = min(
+        (layer for layer in kv_sources if layer > source_layer_id),
+        default=config.num_hidden_layers,
+    )
+    first = max(start, source_layer_id + 1)
+    return any(
+        layer in index_sources and layer not in kv_sources
+        for layer in range(first, min(end, group_end))
+    )
+
+
+def _build_index_k_replica(
+    consumer_attn: Any,
+    source_attn_prefix: str,
+    cache_config: CacheConfig,
+    config: Any,
+) -> Any:
+    """Own the source's indexer K cache when a later local layer reads it.
+
+    The first consumer on a stage builds the replica set. That layer is often
+    not an index source, so it brings no indexer K cache, while a later layer
+    on the same stage is one and reads the source keys. Build the cache here
+    and register it, so that later layer resolves to it and the relay fills it
+    every step. Without this the later layer builds a cache that nobody writes
+    and its indexer scores uninitialized memory.
+    """
+    source_layer_id = int(source_attn_prefix.rsplit("layers.", 1)[1].split(".")[0])
+    if not _stage_reads_index_keys(source_layer_id, config):
+        return None
+
+    from vllm.config import get_current_vllm_config
+    from vllm.models.deepseek_v4_1.attention import (
+        DeepseekV4IndexerCache,
+        _indexer_k_cache_head_dim,
+        dsa_indexer_uses_fp4,
+    )
+
+    prefix = f"{source_attn_prefix}.indexer.k_cache"
+    existing = consumer_attn._static_forward_context.get(prefix)
+    if existing is not None:
+        return existing
+    vllm_config = get_current_vllm_config()
+    logger.info("kv-group relay owns the indexer K cache %s", prefix)
+    return DeepseekV4IndexerCache(
+        head_dim=_indexer_k_cache_head_dim(
+            config.index_head_dim, dsa_indexer_uses_fp4(vllm_config)
+        ),
+        dtype=torch.uint8,
+        prefix=prefix,
+        cache_config=cache_config,
+        compress_ratio=consumer_attn.compress_ratio,
+    )
 
 
 def build_relay(
@@ -222,6 +302,10 @@ def build_relay(
         backend_cls=consumer_attn.backend_cls,
     )
     consumer_attn._static_forward_context[source_attn_prefix] = replica
+    if index_k_cache is None:
+        index_k_cache = _build_index_k_replica(
+            consumer_attn, source_attn_prefix, cache_config, config
+        )
     shadow = SourceIndexerShadow(
         prefix=f"{source_attn_prefix}.indexer",
         head_dim=consumer_attn.head_dim,
@@ -234,7 +318,7 @@ def build_relay(
         index_k_cache=index_k_cache,
         shadow=shadow,
         compress_ratio=consumer_attn.compress_ratio,
-        use_fp4_kv=getattr(consumer_attn, "use_fp4_kv", False),
+        use_fp4_kv=_indexer_fp4(),
         rotary_emb=consumer_attn.rotary_emb,
     )
     _PENDING.append(relay)

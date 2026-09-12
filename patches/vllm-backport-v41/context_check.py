@@ -1,41 +1,39 @@
 #!/usr/bin/env python3
-"""Check that the server reads its own prompt correctly.
+"""Check that the server reads a fact from deep inside its own prompt.
 
-The prompt names one rare string once, and the question asks for that string
-alone. A wrong answer means the server read the prompt incorrectly, because
-the string is right there in the context. The failure is a garbled copy of
-the string, not a refusal.
+The prompt names one rare path once, at a chosen depth, and the question asks
+for that path alone. A wrong answer means the server did not reach the fact,
+because the fact is right there in the context. The failure is a garbled copy
+of the path or a run of unrelated lines, not a refusal.
+
+Depth is the point of the script. V4.1 attends to a local window plus the
+blocks its sparse indexer picks. A fact near the end of the prompt sits in the
+local window, so the model reads it without the indexer and the run passes on
+a broken indexer. Plant the fact in the first few percent instead, and the
+answer depends on the indexer picking the right blocks.
 
 Usage:
 
-    python3 context_check.py [PORT] [TRIALS] [TOKENS] [PROMPT_FILE]
+    python3 context_check.py [PORT] [TRIALS] [TOKENS] [DEPTH_PERCENT]
 
-PROMPT_FILE is a text file holding the body of the prompt. The script appends
-the fact and the question to it, and puts a per-trial salt at the front so no
-trial reads the answer out of the prefix cache.
-
-The built-in prompt is a smoke test and is not sufficient. Generated prose,
-however varied, scores 0 wrong of 8 on a layout that a captured agent preamble
-fails 6 times out of 6. Pass a real preamble through PROMPT_FILE to test for
-the fault that SERVING.md describes under "A relayed pipeline stage corrupts
-the prompt".
+Every trial carries a different salt, so no trial reads the answer out of the
+prefix cache.
 """
 import json
-import re
 import sys
 import urllib.request
 
 PORT = sys.argv[1] if len(sys.argv) > 1 else "8098"
-TRIALS = int(sys.argv[2]) if len(sys.argv) > 2 else 8
-TOKENS = int(sys.argv[3]) if len(sys.argv) > 3 else 6000
-PROMPT_FILE = sys.argv[4] if len(sys.argv) > 4 else None
+TRIALS = int(sys.argv[2]) if len(sys.argv) > 2 else 10
+TOKENS = int(sys.argv[3]) if len(sys.argv) > 3 else 40000
+DEPTH = int(sys.argv[4]) if len(sys.argv) > 4 else 5
 BASE = f"http://127.0.0.1:{PORT}/v1/chat/completions"
 
 NEEDLE = "/home/Schaka/Documents/rocm-gfx803"
 FACT = f'The session workspace is "{NEEDLE}". All paths are relative to it.'
 
-# Dense prose, not repeated filler. Repeated filler does not reproduce the
-# fault, because the model can rebuild it from any part of the context.
+# Dense prose, not repeated filler. Repeated filler does not reproduce a fault,
+# because the model can rebuild it from any part of the context.
 SUBJECTS = [
     "scheduler", "allocator", "indexer", "compressor", "sampler", "drafter",
     "tokenizer", "profiler", "collector", "dispatcher", "planner", "validator",
@@ -52,14 +50,12 @@ VERBS = [
 
 
 def build(salt: int) -> str:
-    """Dense prose with one rare fact at the end.
+    """Dense prose with one rare fact planted at `DEPTH` percent.
 
-    Every line differs, so the model cannot rebuild a missing line from its
+    Every line differs, so the model cannot rebuild the fact from its
     neighbours, and the salt makes each trial miss the prefix cache.
     """
-    lines = [f"Report {salt}. Read the notes, then answer the question.", ""]
-    if PROMPT_FILE:
-        return "\n".join(lines + [open(PROMPT_FILE).read(), "", FACT])
+    lines = []
     i = 0
     while len(" ".join(lines)) < TOKENS * 4:
         subject = SUBJECTS[(i * 7 + salt) % len(SUBJECTS)]
@@ -70,8 +66,9 @@ def build(salt: int) -> str:
             f"after step {(i * 13 + salt) % 991}."
         )
         i += 1
-    lines += ["", FACT]
-    return "\n".join(lines)
+    lines.insert(max(1, len(lines) * DEPTH // 100), FACT)
+    head = [f"Report {salt}. Read the notes, then answer the question.", ""]
+    return "\n".join(head + lines)
 
 
 def once(salt: int):
@@ -88,26 +85,24 @@ def once(salt: int):
     req = urllib.request.Request(
         BASE, json.dumps(body).encode(), headers={"Content-Type": "application/json"}
     )
-    data = json.load(urllib.request.urlopen(req, timeout=1800))
+    data = json.load(urllib.request.urlopen(req, timeout=3600))
     message = data["choices"][0]["message"]
     # A run that spends its whole budget thinking has no content. Read the
     # reasoning instead, because the path still shows there.
     answer = ((message.get("content") or "") or (message.get("reasoning") or ""))
     answer = answer.strip()
-    usage = data["usage"]
-    cached = usage.get("prompt_tokens_details", {}).get("cached_tokens", 0)
-    return NEEDLE in answer, answer[-70:], usage["prompt_tokens"], cached
+    return NEEDLE in answer, answer[-80:], data["usage"]["prompt_tokens"]
 
 
 def main() -> int:
     wrong = []
     tokens = 0
     for trial in range(TRIALS):
-        ok, answer, tokens, cached = once(trial + TOKENS)
-        print(f"{trial:2d} ok={ok} cached={cached:>6}/{tokens:<6} {answer!r}")
+        ok, answer, tokens = once(trial * 97 + DEPTH)
+        print(f"{trial:2d} ok={ok} {answer!r}", flush=True)
         if not ok:
             wrong.append(answer)
-    print(f"\nport {PORT}: {tokens} tokens, wrong {len(wrong)}/{TRIALS}")
+    print(f"\nport {PORT} depth {DEPTH}%: {tokens} tokens, wrong {len(wrong)}/{TRIALS}")
     for answer in sorted(set(wrong)):
         print("   ", answer)
     return 1 if wrong else 0

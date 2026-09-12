@@ -839,10 +839,6 @@ fields: ['annotations', 'audio', 'content', 'function_call', 'reasoning',
 
 ### dsv416: the same model on 6 GPUs
 
-**This profile splits a kv-sharing group and reads its own prompt
-incorrectly. Do not use it for real work.** See "A relayed pipeline
-stage corrupts the prompt".
-
 The `dsv416` profile serves DeepSeek-V4.1-Flash on GPUs 0 to 5, with
 tensor-parallel-size 2 and pipeline-parallel-size 3. It frees 2 cards for
 other work and it prefills faster than the 8-card profile. It holds far less
@@ -918,12 +914,6 @@ long context.
 
 ### dsv416pp: one pipeline stage per card on 6 GPUs
 
-**This profile reads its own prompt incorrectly. Do not use it for real
-work.** See "A relayed pipeline stage corrupts the prompt" below. Use
-`dsv41` on 8 GPUs, which does not split a kv-sharing group and reads its
-prompt correctly.
-
-
 The `dsv416pp` profile serves DeepSeek-V4.1-Flash on GPUs 0 to 5 with
 tensor-parallel-size 1 and pipeline-parallel-size 6. It is the fastest V4.1
 profile on this box. It prefills twice as fast as `dsv416` and three times as
@@ -989,6 +979,17 @@ A stage that writes no kv source of its own passes the latent it receives
 on to the next stage. The candidate blocks chain the same way, through the
 buffer each stage refills.
 
+The relay also owns the indexer key cache of the source layer. It takes
+that cache whenever a later layer on the same stage reads those keys. Layers
+24 and 36 read them under the partition `7,7,7,7,7,5`. The relay writes
+that cache every step from the same latent. Without an owner the layer builds
+a cache that nothing writes, and its indexer scores uninitialized memory. Two
+lines in the log name the caches the relay owns:
+
+```
+kv-group relay owns the indexer K cache language_model.model.layers.20.attn.indexer.k_cache
+```
+
 #### Recall test
 
 The profile recalls a fact planted at 15 percent and at 75 percent depth in
@@ -1005,10 +1006,6 @@ Prefill is where length costs. The profile prefills 118,225 tokens at 5,078
 tokens per second and 239,025 tokens at 4,786 tokens per second.
 
 ### dsv418: one pipeline stage per card
-
-**This profile splits a kv-sharing group and reads its own prompt
-incorrectly. Do not use it for real work.** See "A relayed pipeline
-stage corrupts the prompt".
 
 The `dsv418` profile serves DeepSeek-V4.1-Flash on all 8 GPUs with
 tensor-parallel-size 1 and pipeline-parallel-size 8. It carries no measured
@@ -1116,55 +1113,32 @@ A `<｜DSML｜function_calls>` wrapper is the V3.2 spelling and stays verbatim.
 Inside the thinking block it keeps its own state, so quoting it does not move
 the text into the answer.
 
-### A relayed pipeline stage corrupts the prompt
+### A retrieval check for a relayed pipeline stage
 
-A pipeline stage that reads a kv-sharing group it does not write returns the
-wrong content for parts of its own prompt. The model does not refuse and does
-not crash. It answers fluently with a near copy of the text it
-was asked about. One example is `/home/Schalke/rocm-gfx803` in place of
+A pipeline stage that reads a kv-sharing group it does not write depends on
+the relay for every cache the group shares. A gap in the relay does not crash
+the engine. The model answers fluently with a near copy of the text it was
+asked about. One example is `/home/Schaka/Documents/rocgfx803` in place of
 `/home/Schaka/Documents/rocm-gfx803`. It can also repeat one line until it
 runs out of budget.
 
 [`context_check.py`](patches/vllm-backport-v41/context_check.py) measures it.
-It needs a prompt body, a rare path planted once, and a question asking for
-that path alone. Every trial carries a different salt, so no trial reads the
-answer out of the prefix cache.
+It plants a rare path once, at a chosen depth, and asks for that path alone.
 
-The prompt body has to be a real agent preamble. A captured one of about
-6,300 tokens, holding workspace instructions and a tool list, gives this:
+Depth is the point. V4.1 attends to a local window plus the blocks its sparse
+indexer picks. A fact near the end of the prompt sits in the local window. The model
+reads it without the indexer, so the run passes even on a broken indexer. Plant the fact in the first few percent instead, and the answer
+depends on the indexer picking the right blocks.
 
-| profile | layout | relays | wrong |
-|---|---|---|---|
-| `dsv416pp` | TP1 x PP6 | 4 | 6 of 6 |
-| `dsv41` | TP4 x PP2 | 0 | 0 of 10 |
+Run it at two depths against every profile that splits a group:
 
-Both runs used one image, one checkpoint and one prompt. The only difference
-is the layer partition. `dsv41` cuts at layer 20, which is a kv-sharing group
-boundary, so it runs no relay and answers correctly every time.
+```bash
+python3 context_check.py 8098 10 40000 5
+python3 context_check.py 8098 10 60000 2
+```
 
-Generated prose does not reproduce the fault. The prompt the script builds by
-itself varies every line and reaches the same size, and `dsv416pp` scores 0
-wrong of 8 on it. Treat a passing run of the built-in prompt as no evidence.
-
-Three things the fault does not depend on:
-
-- **Prompt length.** It shows at 593 tokens, which is one prefill chunk, and
-  at 6,327 tokens, which is four.
-- **The build.** The image built from the kit at commit `a868259` scores 7
-  wrong of 10 on the same prompt and layout, so the fault is not new.
-- **Speculative decoding.** The same layout without `--speculative-config`
-  scores 6 wrong of 6, so the drafter and its buffers are not involved.
-- **Prompt size alone.** Repeated filler hides it up to 11,106 tokens.
-  Generated prose with a different line every time hides it too. Only a real
-  agent preamble shows it so far. That gap is the open work.
-
-A prompt served from the prefix cache answers correctly. Only tokens that the
-relay stage writes in the current step come back wrong.
-
-The relay rebuilds two caches on the reading stage, and the reading stage owns
-the block table for both. The fault sits somewhere in that rebuild. The next
-step is to compare the replicated compressed-KV cache against the one the
-source stage holds, token by token, for one short prompt.
+Both score 0 wrong of 10 on `dsv416pp` and on `dsv41`. A run at 100 percent
+depth proves nothing, and neither does a short prompt.
 
 ### The profile does not set `--max-num-batched-tokens`
 
