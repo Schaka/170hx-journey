@@ -687,6 +687,10 @@ steps:
 parser edits against a built image. It needs no GPU. The base image fails four
 of its eleven checks and a build from this kit passes all of them.
 
+[`context_check.py`](patches/vllm-backport-v41/context_check.py) checks a
+running server against its own prompt. See "A relayed pipeline stage corrupts
+the prompt".
+
 The kit needs podman and nothing else:
 
 ```bash
@@ -910,6 +914,12 @@ long context.
 
 ### dsv416pp: one pipeline stage per card on 6 GPUs
 
+**This profile reads its own prompt incorrectly. Do not use it for real
+work.** See "A relayed pipeline stage corrupts the prompt" below. Use
+`dsv41` on 8 GPUs, which does not split a kv-sharing group and reads its
+prompt correctly.
+
+
 The `dsv416pp` profile serves DeepSeek-V4.1-Flash on GPUs 0 to 5 with
 tensor-parallel-size 1 and pipeline-parallel-size 6. It is the fastest V4.1
 profile on this box. It prefills twice as fast as `dsv416` and three times as
@@ -1097,6 +1107,47 @@ tool names from the request adjustment, which runs once per request.
 A `<｜DSML｜function_calls>` wrapper is the V3.2 spelling and stays verbatim.
 Inside the thinking block it keeps its own state, so quoting it does not move
 the text into the answer.
+
+### A relayed pipeline stage corrupts the prompt
+
+A pipeline stage that reads a kv-sharing group it does not write returns the
+wrong content for parts of its own prompt. The model does not refuse and does
+not crash. It answers fluently with a near copy of the text it
+was asked about. One example is `/home/Schalke/rocm-gfx803` in place of
+`/home/Schaka/Documents/rocm-gfx803`. It can also repeat one line until it
+runs out of budget.
+
+[`context_check.py`](patches/vllm-backport-v41/context_check.py) measures it.
+The prompt is dense prose that names one rare path once, and the question asks
+for that path alone. Every trial carries a different salt, so no trial reads
+the answer out of the prefix cache.
+
+| profile | layout | relays | wrong |
+|---|---|---|---|
+| `dsv416pp` | TP1 x PP6 | 4 | 6 of 6 |
+| `dsv41` | TP4 x PP2 | 0 | 0 of 10 |
+
+Both runs used one image, one checkpoint and one prompt. The only difference
+is the layer partition. `dsv41` cuts at layer 20, which is a kv-sharing group
+boundary, so it runs no relay and answers correctly every time.
+
+Three things the fault does not depend on:
+
+- **Prompt length.** It shows at 593 tokens, which is one prefill chunk, and
+  at 6,327 tokens, which is four.
+- **The build.** The image built from the kit at commit `a868259` scores 7
+  wrong of 10 on the same prompt and layout, so the fault is not new.
+- **Prompt content that repeats.** Padding of repeated filler hides it up to
+  11,106 tokens, because the model can rebuild a lost line from its
+  neighbours. Only dense prose exposes it.
+
+A prompt served from the prefix cache answers correctly. Only tokens that the
+relay stage writes in the current step come back wrong.
+
+The relay rebuilds two caches on the reading stage, and the reading stage owns
+the block table for both. The fault sits somewhere in that rebuild. The next
+step is to compare the replicated compressed-KV cache against the one the
+source stage holds, token by token, for one short prompt.
 
 ### The profile does not set `--max-num-batched-tokens`
 
