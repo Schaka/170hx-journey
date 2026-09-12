@@ -1152,6 +1152,38 @@ The 97 percent row holds the fact about 10,000 tokens from the end. When an agen
 looks up an old tool result, it reads that shape. A run at 100
 percent depth proves nothing, and neither does a short prompt.
 
+### The model sometimes skips its thinking block
+
+The chat template opens the thinking block, so the parser starts in the
+reasoning state and the model must write `</think>` to begin its answer. On
+some steps the model writes `</think>` first and puts its deliberation in the
+answer instead. The client then shows text such as `Let me batch: read the
+region 940-965` where it expects a reply. One captured agent session shows
+this on 11 of 68 steps, and every one of those steps still made correct tool
+calls.
+
+Four things it does not depend on:
+
+- **The parser.** No `<think>` or `</think>` reaches the client, and the tool
+  calls parse. The reasoning field is empty because the model emitted nothing
+  before `</think>`.
+- **`reasoning_effort`.** Every value renders the same prompt length, and
+  `max` does not change the rate. Only `none` changes the prompt, because it
+  turns thinking off.
+- **Earlier leaked text in the history.** Replaying the same conversation
+  with every pre-tool-call text dropped gives the same rate.
+- **Context length on its own.** The same conversation replayed at 55,226,
+  79,811, 107,120, 121,532, 128,849, 132,709 and 141,485 tokens keeps its
+  thinking block every time.
+
+Pass `reasoning_effort` as an integer from 1 to 100 inside
+`chat_template_kwargs`. A top-level integer returns HTTP 400. The strings
+`low`, `high`, `xhigh`, `max` and `none` work in both places.
+
+A client can repair the display. A step with an empty reasoning field that
+ends in tool calls holds deliberation, not an answer. A step that answers the
+user makes no tool call.
+
 ### The profile does not set `--max-num-batched-tokens`
 
 Speculative decoding makes vLLM pick 2048 and print this warning:
